@@ -65,6 +65,7 @@ async function setup(options: { browserCount?: number; testMode?: boolean } = {}
   const directory = await mkdtemp(path.join(os.tmpdir(), 'unicorn-provider-'));
   directories.add(directory);
   const manager = {
+    checkHealth: vi.fn(),
     create: vi.fn(async (_count: number) => undefined),
     snapshots: vi.fn(() => []),
     shutdown: vi.fn(async () => undefined),

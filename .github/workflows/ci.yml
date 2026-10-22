@@ -93,7 +93,8 @@ jobs:
         run: npm run package:win
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-      - name: Launch the packaged Windows executable
+      - name: Extract and launch the portable Windows archive
+        timeout-minutes: 4
         run: npm run test:packaged
       - name: Verify installer installation and launch
         timeout-minutes: 5
@@ -128,6 +129,21 @@ jobs:
           $expectedVersion = (Get-Content package.json | ConvertFrom-Json).version
           if (!$result.windowReady -or !$result.sandbox -or !$result.contextIsolation -or $result.platform -ne 'win32' -or $result.version -ne $expectedVersion -or $result.browsers -lt 1 -or $result.browsers -gt 20) { throw 'Installed app version/security smoke check failed' }
       - run: npm run checksums
+      - name: Record package signature and integrity evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packages = @(Get-ChildItem release/*.exe) + @(Get-ChildItem release/*.zip)
+          $evidence = @($packages | ForEach-Object {
+            $signature = if ($_.Extension -eq '.exe') { (Get-AuthenticodeSignature -LiteralPath $_.FullName).Status.ToString() } else { $null }
+            [pscustomobject]@{
+              filename = $_.Name
+              bytes = $_.Length
+              sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              authenticodeStatus = $signature
+            }
+          })
+          $evidence | ConvertTo-Json -Depth 4 | Set-Content test-results/package-evidence.json
       - name: Remove the temporary trusted certificate
         if: always()
         timeout-minutes: 1

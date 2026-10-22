@@ -184,6 +184,7 @@ export class UnicornController {
     this.samplePerformance();
     this.pollTimer = setInterval(() => {
       this.samplePerformance();
+      this.manager.checkHealth();
       this.tick();
       this.changed();
     }, 2000);

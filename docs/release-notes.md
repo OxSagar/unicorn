@@ -4,7 +4,7 @@ Unicorn is a Windows desktop workspace for up to 20 independent Chromium session
 
 ## Included
 
-Persistent profiles; native browser grid and focused inspection; desktop/mobile/tablet/custom device emulation; ProxyScrape HTTP CONNECT and SOCKS5 proxy ingestion; US/GB/CA/FR/DE/JP/IT filtering; live HTTPS exit verification; atomic endpoint and exit-IP allocation; URL import/distribution; scoped QA stages; scheduling and daily navigation budgets; pause/resume/emergency stop; managed popups; local logs/results; resource monitoring; tray and login controls.
+Persistent profiles; native browser grid and focused inspection; desktop/mobile/tablet/custom device emulation; ProxyScrape HTTP CONNECT and SOCKS5 proxy ingestion; US/GB/CA/FR/DE/JP/IT filtering; live HTTPS exit verification; atomic endpoint and exit-IP allocation; URL import/distribution; scoped QA stages; scheduling and daily navigation/request budgets; pause/resume/emergency stop; managed popups; reviewed queue editing and preserved input drafts; custom link exclusions; local logs/results; resource and heartbeat monitoring; bounded automatic QA renderer recovery; renderer health checks; tray and login controls.
 
 ## Installation
 

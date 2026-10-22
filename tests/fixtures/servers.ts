@@ -117,6 +117,12 @@ export async function createFixtures(
       response.end('{"javascript":true}');
       return;
     }
+    if (path === '/cacheable-resource') {
+      response.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      response.setHeader('Cache-Control', 'public, max-age=3600');
+      response.end('Unicorn HTTP cache fixture\n'.repeat(16384));
+      return;
+    }
     if (path === '/service-worker.js') {
       response.setHeader('Content-Type', 'application/javascript');
       response.setHeader('Service-Worker-Allowed', '/');

@@ -30,6 +30,7 @@ import { RunControl } from '../qa/control';
 import { runStages } from '../qa/stages';
 import { applyDevice, fitDevice, readDiagnostic } from './device';
 import { withDeadline } from './deadline';
+import { RecoveryBudget, RendererCrashError } from './recovery';
 
 type BrowserAction =
   | 'back'
@@ -69,12 +70,21 @@ interface Entry {
   gate: SessionGate;
   children: Map<number, WebContentsView>;
   abort?: AbortController;
+  attemptAbort?: AbortController;
+  intentControl?: RunControl;
   control?: RunControl;
   active?: Promise<void>;
   bounds?: ViewBounds;
   inspectedPopup?: number;
   pausedState?: BrowserState;
   restricted?: Error;
+  rendererFailure?: RendererCrashError;
+  watchdogFailure?: Error;
+  pauseRequested: boolean;
+  recovering: boolean;
+  healthAt: number;
+  healthMisses: number;
+  healthProbe?: { contents: WebContents; abort: AbortController };
   synthetic: boolean;
   closing: boolean;
   downloads: Set<Electron.DownloadItem>;
@@ -83,6 +93,7 @@ export class BrowserManager {
   private entries = new Map<number, Entry>();
   private creating: Promise<void> = Promise.resolve();
   private shuttingDown = false;
+  private recoveryBudgets = new Map<number, RecoveryBudget>();
   constructor(private readonly options: BrowserManagerOptions) {}
 
   private log(entry: Entry, level: ActivityEvent['level'], category: string, message: string): void {
@@ -209,10 +220,15 @@ export class BrowserManager {
       children: new Map(),
       synthetic: false,
       closing: false,
+      pauseRequested: false,
+      recovering: false,
+      healthAt: performance.now(),
+      healthMisses: 0,
       downloads: new Set(),
     };
     holder.entry = entry;
     this.entries.set(id, entry);
+    if (!this.recoveryBudgets.has(id)) this.recoveryBudgets.set(id, new RecoveryBudget());
     this.options.window.contentView.addChildView(view);
     view.setVisible(false);
     this.wireContents(entry, view.webContents, false);
@@ -288,7 +304,14 @@ export class BrowserManager {
   }
 
   private wireContents(entry: Entry, contents: WebContents, child: boolean): void {
+    const contentsId = contents.id;
+    const current = () =>
+      !entry.closing &&
+      (child
+        ? entry.children.get(contentsId)?.webContents === contents
+        : entry.view.webContents === contents);
     contents.on('before-input-event', (event, input) => {
+      if (!current()) return;
       if (input.type === 'keyDown' && input.control && input.shift && input.key.toLowerCase() === 's') {
         event.preventDefault();
         if (this.options.emergencyStop) this.options.emergencyStop();
@@ -306,6 +329,7 @@ export class BrowserManager {
     });
     contents.on('will-navigate', (event, url) => {
       try {
+        if (!current()) throw new Error('The browser view was replaced');
         if (!entry.gate.isEnabled) throw new Error('Browser networking is paused');
         assertApproved(url, this.options.settings());
       } catch (error) {
@@ -315,6 +339,7 @@ export class BrowserManager {
     });
     contents.on('will-redirect', (event, url) => {
       try {
+        if (!current()) throw new Error('The browser view was replaced');
         assertApproved(url, this.options.settings());
       } catch (error) {
         event.preventDefault();
@@ -322,12 +347,14 @@ export class BrowserManager {
       }
     });
     contents.on('did-start-loading', () => {
+      if (!current()) return;
       if (!child) {
         entry.snapshot.loading = true;
         this.changed();
       }
     });
     contents.on('did-stop-loading', () => {
+      if (!current()) return;
       if (!child && !contents.isDestroyed()) {
         entry.snapshot.loading = false;
         entry.snapshot.canGoBack = contents.navigationHistory.canGoBack();
@@ -336,6 +363,7 @@ export class BrowserManager {
       }
     });
     contents.on('did-navigate', (_event, url, httpResponseCode) => {
+      if (!current()) return;
       if (child) {
         this.syncPopups(entry);
         return;
@@ -351,12 +379,14 @@ export class BrowserManager {
       this.changed();
     });
     contents.on('did-navigate-in-page', (_event, url, mainFrame) => {
+      if (!current()) return;
       if (!child && mainFrame) {
         entry.snapshot.url = url;
         this.changed();
       }
     });
     contents.on('page-title-updated', (_event, title) => {
+      if (!current()) return;
       if (child) this.syncPopups(entry);
       else {
         entry.snapshot.title = title;
@@ -364,6 +394,7 @@ export class BrowserManager {
       }
     });
     contents.on('console-message', (details) => {
+      if (!current()) return;
       if (details.level === 'error') {
         entry.snapshot.jsErrors++;
         this.log(
@@ -376,27 +407,46 @@ export class BrowserManager {
       }
     });
     contents.on('render-process-gone', (_event, details) => {
-      if (entry.closing) return;
-      const error = new Error(`Browser renderer exited: ${details.reason}`);
-      entry.snapshot.lastError = error.message;
-      entry.abort?.abort(error);
-      if (canTransition(entry.snapshot.state, 'ERROR')) this.move(entry, 'ERROR');
-      void entry.gate
-        .block()
-        .then(() => this.options.proxies.release(entry.snapshot.id))
-        .catch(() => undefined);
+      if (!current()) return;
+      if (child) {
+        const popup = entry.children.get(contentsId);
+        if (!popup || popup.webContents !== contents) return;
+        entry.children.delete(contentsId);
+        this.options.window.contentView.removeChildView(popup);
+        if (!contents.isDestroyed()) contents.close({ waitForBeforeUnload: false });
+        if (entry.inspectedPopup === contentsId) entry.inspectedPopup = undefined;
+        this.syncPopups(entry);
+        this.log(entry, 'error', 'crash', `Popup renderer exited: ${details.reason}; popup closed`);
+        return;
+      }
+      // Old view callbacks must never interrupt its replacement or a newer operation.
+      if (entry.view.webContents !== contents) return;
+      const error = new RendererCrashError(details.reason, details.exitCode);
+      entry.rendererFailure = error;
+      entry.snapshot.lastError = (entry.restricted ?? error).message;
+      this.cancelHealth(entry);
+      if (entry.restricted) entry.abort?.abort(entry.restricted);
+      else if (entry.attemptAbort) entry.attemptAbort.abort(error);
+      else entry.abort?.abort(error);
+      if (!entry.pauseRequested && canTransition(entry.snapshot.state, 'ERROR')) this.move(entry, 'ERROR');
+      void this.lockNetwork(entry).catch((failure: unknown) =>
+        this.log(entry, 'error', 'network', `Crash cleanup failed: ${String(failure)}`),
+      );
       this.log(
         entry,
         'error',
         'crash',
-        `${error.message}; profile retained. Start the browser again to recover.`,
+        `${error.message}; profile retained. An eligible active QA job may recover within its retry budget.`,
       );
     });
     contents.on('unresponsive', () => {
+      if (!current()) return;
+      entry.healthAt = -Infinity;
       this.log(entry, 'warn', 'watchdog', 'Renderer is unresponsive; operation timeout remains active');
     });
     contents.setWindowOpenHandler((details) => {
       try {
+        if (!current()) throw new Error('The browser view was replaced');
         if (!entry.gate.isEnabled || entry.children.size >= 8)
           throw new Error('Popup limit reached or networking is inactive');
         assertApproved(details.url, this.options.settings());
@@ -480,6 +530,79 @@ export class BrowserManager {
   /** Main-process diagnostic/testing access; this object is never exposed over IPC. */
   getWebContents(id: number): WebContents {
     return this.entry(id).view.webContents;
+  }
+
+  private cancelHealth(entry: Entry): void {
+    entry.healthProbe?.abort.abort(new Error('Renderer health check superseded'));
+    entry.healthMisses = 0;
+    entry.healthAt = performance.now();
+  }
+
+  private healthEligible(entry: Entry, contents = entry.view.webContents): boolean {
+    return (
+      !this.shuttingDown &&
+      !entry.closing &&
+      !entry.pauseRequested &&
+      !entry.recovering &&
+      !entry.restricted &&
+      !entry.watchdogFailure &&
+      entry.gate.isEnabled &&
+      entry.view.webContents === contents &&
+      !contents.isDestroyed() &&
+      !contents.isCrashed() &&
+      !contents.isLoading() &&
+      !entry.snapshot.loading &&
+      ['READY', 'RUNNING'].includes(entry.snapshot.state)
+    );
+  }
+
+  /** Called by the controller's existing heartbeat; never creates a global polling timer. */
+  checkHealth(): void {
+    const now = performance.now();
+    for (const entry of this.entries.values()) {
+      if (!this.healthEligible(entry)) {
+        if (entry.healthProbe || entry.healthMisses) this.cancelHealth(entry);
+        continue;
+      }
+      if (entry.healthProbe || now - entry.healthAt < 10_000) continue;
+      entry.healthAt = now;
+      const probe = { contents: entry.view.webContents, abort: new AbortController() };
+      entry.healthProbe = probe;
+      void withDeadline(
+        Promise.resolve().then(() => probe.contents.executeJavaScriptInIsolatedWorld(713, [{ code: '1' }])),
+        5000,
+        probe.abort.signal,
+      )
+        .then((result: unknown) => {
+          if (result !== 1) throw new Error('Renderer health check returned an invalid response');
+          if (entry.healthProbe === probe && this.healthEligible(entry, probe.contents))
+            entry.healthMisses = 0;
+        })
+        .catch((error: unknown) => {
+          if (probe.abort.signal.aborted || !this.healthEligible(entry, probe.contents)) return;
+          entry.healthMisses++;
+          this.log(
+            entry,
+            'warn',
+            'watchdog',
+            `Renderer health check failed (${entry.healthMisses}/2): ${String(error)}`,
+          );
+          if (entry.healthMisses < 2) return;
+          const failure = new Error('Renderer failed two health checks; testing stopped for manual review');
+          entry.watchdogFailure = failure;
+          entry.snapshot.lastError = failure.message;
+          entry.snapshot.stage = 'Renderer health check failed';
+          entry.abort?.abort(failure);
+          if (canTransition(entry.snapshot.state, 'ERROR')) this.move(entry, 'ERROR');
+          void this.lockNetwork(entry).catch((cleanupError: unknown) =>
+            this.log(entry, 'error', 'network', `Watchdog cleanup failed: ${String(cleanupError)}`),
+          );
+          this.changed();
+        })
+        .finally(() => {
+          if (entry.healthProbe === probe) entry.healthProbe = undefined;
+        });
+    }
   }
 
   layout(bounds: ViewBounds[]): void {
@@ -623,8 +746,11 @@ export class BrowserManager {
     entry.snapshot.lastError = error.message;
     entry.snapshot.stage = 'Manual review required';
     this.log(entry, 'warn', 'authorization', error.message);
-    // block() disables requests synchronously, including background workers and popup traffic.
-    void entry.gate.block().catch((error: unknown) => this.log(entry, 'error', 'network', String(error)));
+    // lockNetwork disables requests synchronously, including workers and popups,
+    // and releases idle manual-page leases even when no operation is running.
+    void this.lockNetwork(entry).catch((error: unknown) =>
+      this.log(entry, 'error', 'network', String(error)),
+    );
     entry.abort?.abort(error);
     if (canTransition(entry.snapshot.state, 'ERROR')) this.move(entry, 'ERROR');
     this.changed();
@@ -636,39 +762,130 @@ export class BrowserManager {
     task: (control: RunControl) => Promise<void>,
   ): Promise<void> {
     entry.abort?.abort(new Error('Replaced by a new browser operation'));
+    this.cancelHealth(entry);
     const previous = entry.active;
     const abort = new AbortController();
+    const intentControl = new RunControl(abort.signal);
     entry.abort = abort;
+    entry.intentControl = intentControl;
+    entry.pauseRequested = false;
     const run = (async () => {
-      await previous?.catch(() => undefined);
-      abort.signal.throwIfAborted();
-      await this.lockNetwork(entry);
-      if (entry.closing) throw new Error('Browser was closed');
-      this.move(entry, 'STOPPED');
-      entry.restricted = undefined;
-      entry.synthetic = synthetic;
-      entry.snapshot.startedAt = Date.now();
-      const control = new RunControl(abort.signal);
-      entry.control = control;
       try {
-        await task(control);
-        if (synthetic) {
-          this.move(entry, 'COMPLETED');
-          if (this.options.settings().closePopupsAfterRun) this.closePopups(entry);
-          await this.lockNetwork(entry);
+        await previous?.catch(() => undefined);
+        abort.signal.throwIfAborted();
+        await this.lockNetwork(entry);
+        abort.signal.throwIfAborted();
+        if (entry.closing) throw new Error('Browser was closed');
+        this.move(entry, 'STOPPED');
+        if (entry.pauseRequested) {
+          // Pause may arrive while the previous operation or native gate is
+          // settling. Keep the new intent visibly resumable before checkpoint.
+          entry.pausedState = 'WAITING_FOR_PROXY';
+          this.move(entry, 'WAITING_FOR_PROXY');
+          this.move(entry, 'PAUSED');
+        }
+        // Only a fresh explicit intent may clear a previous restriction. Automatic
+        // renderer attempts below never clear it or replace the lifetime signal.
+        entry.restricted = undefined;
+        entry.rendererFailure = undefined;
+        entry.watchdogFailure = undefined;
+        entry.synthetic = synthetic;
+        entry.snapshot.startedAt = Date.now();
+        if (entry.view.webContents.isDestroyed() || entry.view.webContents.isCrashed())
+          await this.repairRenderer(entry, intentControl);
+        let retries = 0;
+        for (;;) {
+          await intentControl.checkpoint();
+          abort.signal.throwIfAborted();
+          if (entry.restricted) throw entry.restricted;
+          const attemptAbort = new AbortController();
+          entry.attemptAbort = attemptAbort;
+          entry.rendererFailure = undefined;
+          entry.recovering = false;
+          const control = new RunControl(AbortSignal.any([abort.signal, attemptAbort.signal]));
+          if (entry.pauseRequested) control.pause();
+          entry.control = control;
+          try {
+            await task(control);
+            await intentControl.checkpoint();
+            if (entry.restricted) throw entry.restricted;
+            if (entry.rendererFailure) throw entry.rendererFailure;
+            if (synthetic) {
+              this.move(entry, 'COMPLETED');
+              if (this.options.settings().closePopupsAfterRun) this.closePopups(entry);
+              await this.lockNetwork(entry);
+            }
+            break;
+          } catch (error) {
+            const failure =
+              entry.restricted ??
+              (abort.signal.aborted ? abort.signal.reason : undefined) ??
+              entry.rendererFailure ??
+              error;
+            if (!synthetic || abort.signal.aborted || entry.closing || entry.restricted) throw failure;
+            const decision = this.recoveryBudgets
+              .get(entry.snapshot.id)!
+              .reserve(failure, retries, this.options.settings().retryLimit);
+            if (!decision.allowed) {
+              if (failure instanceof RendererCrashError)
+                this.log(
+                  entry,
+                  'warn',
+                  'recovery',
+                  `Automatic renderer recovery stopped: ${decision.reason}`,
+                );
+              throw failure;
+            }
+            // A failed or poisoned native gate is terminal. lockNetwork still
+            // releases the lease in its finally block and never changes Session.
+            await this.lockNetwork(entry);
+            abort.signal.throwIfAborted();
+            if (entry.restricted) throw entry.restricted;
+            retries = decision.retry;
+            entry.attemptAbort = undefined;
+            entry.recovering = true;
+            entry.control = intentControl;
+            entry.snapshot.stage = `Renderer recovery ${retries}`;
+            if (entry.pauseRequested) entry.pausedState = 'RETRY_WAIT';
+            else {
+              this.move(entry, 'STOPPED');
+              this.move(entry, 'WAITING_FOR_PROXY');
+              this.move(entry, 'RETRY_WAIT');
+            }
+            this.log(
+              entry,
+              'warn',
+              'recovery',
+              `Restarting the accepted QA job after renderer exit; retry ${retries}`,
+            );
+            await intentControl.wait(decision.delayMs);
+            await this.repairRenderer(entry, intentControl);
+          } finally {
+            attemptAbort.abort(new Error('Renderer attempt finished'));
+            if (entry.attemptAbort === attemptAbort) entry.attemptAbort = undefined;
+          }
         }
       } catch (error) {
-        entry.snapshot.lastError = error instanceof Error ? error.message : String(error);
+        const failure = entry.restricted ?? error;
+        entry.snapshot.lastError = failure instanceof Error ? failure.message : String(failure);
         if (
           entry.snapshot.state !== 'WAITING_FOR_PROXY' &&
           !entry.closing &&
           canTransition(entry.snapshot.state, 'ERROR')
         )
-          this.move(entry, abort.signal.aborted && !entry.restricted ? 'STOPPED' : 'ERROR');
+          this.move(
+            entry,
+            abort.signal.aborted &&
+              !entry.restricted &&
+              !entry.watchdogFailure &&
+              !(failure instanceof RendererCrashError)
+              ? 'STOPPED'
+              : 'ERROR',
+          );
         await this.lockNetwork(entry).catch((cleanupError: unknown) => {
           this.log(entry, 'error', 'network', `Network cleanup also failed: ${String(cleanupError)}`);
         });
-        throw error;
+        throw failure;
       } finally {
         entry.snapshot.elapsedMs = entry.snapshot.startedAt ? Date.now() - entry.snapshot.startedAt : 0;
         entry.snapshot.startedAt = undefined;
@@ -679,7 +896,10 @@ export class BrowserManager {
         this.save(entry);
         if (entry.abort === abort) {
           entry.control = undefined;
+          entry.intentControl = undefined;
           entry.abort = undefined;
+          entry.attemptAbort = undefined;
+          entry.recovering = false;
         }
         this.changed();
       }
@@ -691,6 +911,56 @@ export class BrowserManager {
       })
       .catch(() => undefined);
     return run;
+  }
+
+  private async repairRenderer(entry: Entry, control: RunControl): Promise<void> {
+    await control.checkpoint();
+    if (entry.closing || this.shuttingDown) throw new Error('Browser was closed');
+    if (entry.restricted) throw entry.restricted;
+    await this.lockNetwork(entry);
+    await control.checkpoint();
+    if (entry.restricted) throw entry.restricted;
+    this.closePopups(entry);
+    this.cancelHealth(entry);
+    const previous = entry.view;
+    const url = entry.snapshot.url;
+    const title = entry.snapshot.title;
+    const view = this.newView(entry.session);
+    // Publish identity before closing the old view: its late events cannot affect this view.
+    entry.view = view;
+    this.options.window.contentView.addChildView(view);
+    view.setVisible(false);
+    this.wireContents(entry, view.webContents, false);
+    this.options.window.contentView.removeChildView(previous);
+    if (!previous.webContents.isDestroyed()) previous.webContents.close({ waitForBeforeUnload: false });
+    try {
+      await withDeadline(view.webContents.loadURL('about:blank'), 8000, control.signal);
+      await withDeadline(applyDevice(view.webContents, entry.snapshot.device), 10_000, control.signal);
+      await control.checkpoint();
+      if (entry.restricted) throw entry.restricted;
+      if (view.webContents.isCrashed())
+        throw entry.rendererFailure ?? new Error('Replacement renderer exited');
+      entry.snapshot.url = url;
+      entry.snapshot.title = title;
+      entry.snapshot.loading = false;
+      entry.snapshot.canGoBack = false;
+      entry.snapshot.canGoForward = false;
+      if (entry.bounds) {
+        view.setBounds(entry.bounds);
+        view.setVisible(entry.bounds.visible);
+      }
+      this.log(
+        entry,
+        'info',
+        'recovery',
+        'Renderer recreated with its original isolated profile and device; networking remains locked',
+      );
+    } catch (error) {
+      // A late CDP operation may still settle; retiring this view prevents it from
+      // changing a newer operation's target. The persistent Session remains denied.
+      if (!view.webContents.isDestroyed()) view.webContents.close({ waitForBeforeUnload: false });
+      throw error;
+    }
   }
 
   async navigate(id: number, url: string): Promise<void> {
@@ -758,28 +1028,46 @@ export class BrowserManager {
 
   async pause(id: number): Promise<void> {
     const entry = this.entry(id);
-    if (entry.snapshot.state === 'PAUSED' || !canTransition(entry.snapshot.state, 'PAUSED')) return;
-    entry.pausedState = entry.snapshot.state;
+    if (entry.pauseRequested || (!entry.active && !canTransition(entry.snapshot.state, 'PAUSED'))) return;
+    entry.pauseRequested = true;
+    entry.pausedState = canTransition('PAUSED', entry.snapshot.state)
+      ? entry.snapshot.state
+      : 'WAITING_FOR_PROXY';
+    entry.intentControl?.pause();
     entry.control?.pause();
+    this.cancelHealth(entry);
     // Pause test time and all session requests. The assignment remains reserved.
     await entry.gate.block();
     if (!entry.view.webContents.isDestroyed()) entry.view.webContents.stop();
+    if (!entry.pauseRequested || entry.closing) return;
+    if (!canTransition(entry.snapshot.state, 'PAUSED')) {
+      this.move(entry, 'STOPPED');
+      this.move(entry, 'WAITING_FOR_PROXY');
+    }
     this.move(entry, 'PAUSED');
   }
 
   async resume(id: number): Promise<void> {
     const entry = this.entry(id);
-    if (entry.snapshot.state !== 'PAUSED') return;
+    if (!entry.pauseRequested || entry.snapshot.state !== 'PAUSED') return;
+    if (entry.restricted) throw entry.restricted;
     const signal = entry.control?.signal ?? new AbortController().signal;
-    if (entry.snapshot.proxy) await entry.gate.assign(entry.snapshot.proxy, signal, entry.synthetic);
+    if (entry.snapshot.proxy && !entry.recovering)
+      await entry.gate.assign(entry.snapshot.proxy, signal, entry.synthetic);
+    if (!entry.pauseRequested || entry.closing || entry.abort?.signal.aborted) return;
+    entry.pauseRequested = false;
     const previous = entry.pausedState ?? 'RUNNING';
     this.move(entry, previous);
+    entry.intentControl?.resume();
     entry.control?.resume();
+    this.cancelHealth(entry);
   }
 
   async stop(id: number): Promise<void> {
     const entry = this.entry(id);
+    entry.pauseRequested = false;
     entry.abort?.abort(new Error('Stopped by user'));
+    this.cancelHealth(entry);
     let failure: unknown;
     await entry.gate.block().catch((error: unknown) => {
       failure = error;
@@ -861,7 +1149,10 @@ export class BrowserManager {
       await withDeadline(entry.session.clearStorageData({ storages: ['cookies'] }), 8000);
     if (action === 'history' || action === 'reset') {
       entry.snapshot.history = [];
-      entry.view.webContents.navigationHistory.clear();
+      const history = entry.view.webContents.navigationHistory;
+      history.clear();
+      entry.snapshot.canGoBack = history.canGoBack();
+      entry.snapshot.canGoForward = history.canGoForward();
     }
     if (action === 'permissions' || action === 'reset') {
       entry.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -908,7 +1199,7 @@ export class BrowserManager {
       if (!popup.webContents.isDestroyed()) popup.webContents.close({ waitForBeforeUnload: false });
     }
     this.syncPopups(entry);
-    if (entry.bounds) entry.view.setVisible(entry.bounds.visible);
+    if (entry.bounds && !entry.view.webContents.isDestroyed()) entry.view.setVisible(entry.bounds.visible);
   }
 
   async diagnostic(id: number): Promise<Record<string, unknown>> {
@@ -989,7 +1280,7 @@ export class BrowserManager {
     entry.gate.dispose();
     entry.session.removeAllListeners('will-download');
     this.options.window.contentView.removeChildView(entry.view);
-    entry.view.webContents.close({ waitForBeforeUnload: false });
+    if (!entry.view.webContents.isDestroyed()) entry.view.webContents.close({ waitForBeforeUnload: false });
     this.entries.delete(id);
     this.log(entry, 'info', 'browser', 'Browser closed; persistent profile retained');
     this.changed();

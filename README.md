@@ -18,7 +18,8 @@ Windows release assets include an NSIS installer, a portable ZIP, and `SHA256SUM
 - Blocks page networking before proxy assignment and after pause, stop, or failure. Proxy configuration contains no direct fallback and removes the implicit loopback bypass.
 - Imports TXT/CSV URLs and distributes them using same-URL, round-robin, balanced, or manual assignment, with editable queue review before starting.
 - Runs bounded landing-page, internal-link, and approved external-link QA stages with asynchronous waits, scrolling, console/resource diagnostics, screenshots, and cancellation.
-- Supports schedules, daily navigation/request quotas, emergency stop, local logs/results export, performance measurements, tray controls, and optional start at login.
+- Supports schedules, daily navigation/request quotas, emergency stop, local logs/results export, performance/heartbeat measurements, tray controls, and optional start at login.
+- Repairs eligible renderer crashes during an accepted QA job under bounded retry and per-profile limits; detects stalled renderers and preserves profile data.
 
 ## First run
 

@@ -80,6 +80,7 @@ class BrowserDouble {
   });
 
   readonly snapshots = vi.fn(() => structuredClone([...this.browsers.values()]));
+  readonly checkHealth = vi.fn();
 
   readonly runQa = vi.fn(async (id: number, url: string) => {
     const browser = this.browser(id);

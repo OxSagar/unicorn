@@ -59,7 +59,7 @@ The suite exercises JavaScript, Fetch, cookies, local storage, IndexedDB, cache,
 
 ## CI and publishing
 
-`.github/workflows/ci.yml` runs source checks on Ubuntu and real Chromium/package verification on `windows-2025`. Reports are uploaded even on failure. On Windows it builds the installer and portable ZIP, runs the packaged executable, silently installs into the temporary runner, launches that installed copy, and computes checksums. Test certificates are removed in an unconditional cleanup step.
+`.github/workflows/ci.yml` runs source checks on Ubuntu and real Chromium/package verification on `windows-2025`. Reports are uploaded even on failure. On Windows it builds the installer and portable ZIP, extracts the actual ZIP and launches its executable, silently installs the NSIS package into the temporary runner, launches that installed copy, and computes checksums. The report records exact versions, sandbox/context isolation, package sizes, SHA-256 values and installer Authenticode status. Test certificates are removed in an unconditional cleanup step.
 
 The release workflow reuses the same checks. It publishes only after all jobs succeed, validates version/filenames/checksums, and never overwrites an already published version. A version containing a prerelease suffix is published as a GitHub prerelease. GitHub Actions dependencies are pinned to audited upstream tag SHAs; Dependabot tracks future updates.
 
@@ -68,7 +68,8 @@ The release workflow reuses the same checks. It publishes only after all jobs su
 - `unit.xml` reports pure logic tests. It does not prove native behavior.
 - The Playwright report and `e2e.xml` identify real runtime tests and their pass/fail/skipped status.
 - `packaged-smoke.json` and `installed-smoke.json` record the Windows application/version and actual preload sandbox/isolation observations.
-- Concurrency-test attachments record the tested browser count and resource samples. They are short-run measurements, not a 24-hour benchmark.
+- Concurrency-test attachments record the tested browser count, exact hardware and resource samples. The three-cycle stability attachment records actual one-minute recurrence, 60 jobs across 20 profiles, repeated heartbeat/resource samples, storage markers, proxy uniqueness and direct-request counts. These are short-run measurements, not a 24-hour benchmark.
+- `package-evidence.json` records final package sizes, SHA-256 values and installer signature status. `packaged-smoke.json` confirms that the distributed portable ZIP was extracted and launched.
 - The npm dependency audit must succeed independently; an inaccessible audit endpoint is a blocked check, not a clean audit.
 
 ## Outstanding broader acceptance

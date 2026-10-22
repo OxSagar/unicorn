@@ -8,7 +8,7 @@ The application samples actual Electron process CPU and working-set memory every
 
 Balanced assignment scores each selected profile using pending/running job count plus its current renderer CPU percentage divided by 25 and working-set MB divided by 512. This documented heuristic defers assignment toward less busy renderers; it does not migrate existing jobs or predict arbitrary page cost.
 
-New QA jobs wait when the configured memory budget is exceeded. Existing browser profiles remain intact. Proxy validation uses at most four parallel Chromium validation sessions. Each browser has bounded retries and finite navigation/operation timeouts. Captures, histories, queues, and logs have retention/size limits.
+New QA jobs wait when the configured memory budget is exceeded. Existing browser profiles remain intact. Proxy validation uses at most four parallel Chromium validation sessions. Each browser has bounded retries and finite navigation/operation timeouts. A renderer watchdog probes eligible loaded pages every ten seconds, allows five seconds per probe, and stops a profile after two consecutive misses. Only confirmed eligible renderer exits can trigger bounded replay of an already accepted QA job. The same profile is retained; memory exhaustion and site restrictions require manual review. Captures, histories, queues, and logs have retention/size limits.
 
 ## Reference hardware guidance
 
@@ -18,7 +18,7 @@ GitHub-hosted Windows runners are a verification environment; their available CP
 
 ## Short-run evidence
 
-Native tests create and navigate 1, 5, 10, 15, and 20 browsers on controlled fixtures, exercise all selectable counts, measure snapshot responsiveness, and clean up child processes. These results must be read from the associated CI artifact. No baseline CPU/RAM numbers are asserted here before they have been measured.
+Native tests create and navigate 1, 5, 10, 15, and 20 browsers on controlled fixtures, exercise all selectable counts, measure snapshot responsiveness, and clean up child processes. These results must be read from the associated CI artifact. A separate short stability test starts 20 profiles once and requires three actual one-minute recurrence cycles, 60 completed jobs, retained per-profile storage, unique leases, zero direct fixture requests and complete cleanup. Its raw attachment includes repeated resource, heartbeat and dashboard-response samples. This short test is distinct from the 24-hour procedure below. No baseline CPU/RAM numbers are asserted here before they have been measured.
 
 ## Extended soak procedure
 

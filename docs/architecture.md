@@ -69,7 +69,7 @@ Device emulation uses Chromium's DevTools protocol for user agent and client hin
 
 ## Persistence and recovery
 
-Application state writes are serialized and replace a same-directory temporary file atomically. Corrupt state is preserved under a dated name and safe defaults are loaded. Chromium storage is flushed during operation completion, profile actions and shutdown. A renderer crash blocks and releases its network lease while retaining the profile. The user can start that profile again to create a working renderer; unattended crash recovery is not silently assumed.
+Application state writes are serialized and replace a same-directory temporary file atomically. Corrupt state is preserved under a dated name and safe defaults are loaded. Chromium storage is flushed during operation completion, profile actions and shutdown. A renderer crash blocks and releases its network lease while retaining the profile. An accepted active QA job can restart from its original approved URL after a typed native crashed/killed/abnormal-exit event, under the configured retry limit and a separate maximum of three repairs per profile in a rolling ten-minute window. A lifetime cancellation signal spans attempts, while individual renderers have separate attempt cancellation. Repair replaces only the view, keeping the same persistent Session, request gate, device and job identity. Pause suspends backoff; Stop, replacement, close, access restrictions and a poisoned Session prevent a late restart. Manual browsing, memory exhaustion, integrity/launch failures and arbitrary page errors do not trigger automatic replay.
 
 No backend service is required. The optional Windows login and tray integration operates in the user's interactive desktop session. Logging out terminates that environment; Unicorn does not claim to provide interactive Chromium rendering inside Windows Session 0.
 
@@ -85,3 +85,7 @@ Pure logic and network-gate tests exercise failure paths, cancellation, allocati
 - [Electron navigation history](https://www.electronjs.org/docs/latest/api/navigation-history)
 - [ProxyScrape public API](https://docs.proxyscrape.com/api-reference/public-api/get-proxy-list)
 - [IPWho.is diagnostic API](https://ipwhois.io/documentation)
+
+## Heartbeat and renderer watchdog
+
+The existing two-second controller poll records a monotonic heartbeat count and current/peak sampling delay. Logs record a heartbeat at most once per minute. Every ten seconds, eligible loaded, active, unpaused views may receive one isolated-world constant-expression probe with a five-second deadline. Probes coalesce per view and are cancelled on lifecycle changes. Two consecutive misses stop that profile and close its network gate for manual review; a missed probe is never classified as a confirmed renderer crash. This is an in-process renderer watchdog, so a completely frozen main process still requires an external supervisor or user intervention.
