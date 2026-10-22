@@ -67,6 +67,17 @@ export interface TestJob {
   finishedAt?: number;
   error?: string;
 }
+export interface PreparedRun {
+  id: string;
+  count: number;
+  device: 'desktop' | 'mobile' | 'tablet';
+  domains: string[];
+  jobIds: string[];
+  browserIds: number[];
+  urls: string[];
+  createdAt: number;
+  status: 'ready' | 'running' | 'finished';
+}
 export interface TimingSettings {
   landingWaitMs: number;
   landingScrollMs: number;
@@ -129,6 +140,8 @@ export interface AppSnapshot {
   browsers: BrowserSnapshot[];
   proxies: ProxyRecord[];
   jobs: TestJob[];
+  preservedJobs: TestJob[];
+  preparedRun: PreparedRun | null;
   logs: ActivityEvent[];
   performance: PerformanceSnapshot;
   provider: {
@@ -151,6 +164,8 @@ export interface ViewBounds {
 }
 export type AppCommand =
   | { type: 'snapshot' }
+  | { type: 'simple-distribute'; text: string; count: number; device: 'desktop' | 'mobile' | 'tablet' }
+  | { type: 'simple-start'; reviewId: string; confirmed: true }
   | { type: 'create'; count: number }
   | { type: 'navigate'; id: number; url: string }
   | {

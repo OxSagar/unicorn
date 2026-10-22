@@ -198,6 +198,33 @@ describe('persistent state writer and recovery', () => {
     expect(restored.jobs.every((item) => item.status === 'pending')).toBe(true);
   });
 
+  it('preserves 1,000 active rows independently of 500 terminal rows in a mixed-order saved file', async () => {
+    const state = initialData();
+    const pending = Array.from({ length: 1000 }, (_, index) => job(`pending-${index}`, 'pending'));
+    const terminal = Array.from({ length: 700 }, (_, index) => job(`done-${index}`, 'completed'));
+    state.jobs = [...pending.slice(0, 500), ...terminal, ...pending.slice(500)];
+    await new LocalStore(directory).save(state);
+    const restored = await new LocalStore(directory).load();
+    expect(restored.jobs.filter((item) => item.status === 'pending')).toEqual(pending);
+    expect(restored.jobs.filter((item) => item.status === 'completed')).toEqual(terminal.slice(-500));
+    expect(restored.jobs).toHaveLength(1500);
+  });
+
+  it('loads bounded inert saved work and simple provenance without restoring review authority', async () => {
+    const state = initialData();
+    state.jobs = [job('simple-one', 'pending'), job('simple-two', 'running')];
+    state.preservedJobs = Array.from({ length: 1200 }, (_, index) => job(`legacy-${index}`, 'pending'));
+    state.simpleJobIds = ['simple-one', 'simple-two', 'absent', 'simple-one'];
+    await new LocalStore(directory).save(state);
+    const restored = await new LocalStore(directory).load();
+    expect(restored.preservedJobs).toHaveLength(1000);
+    expect(restored.preservedJobs.every((item) => item.status === 'pending')).toBe(true);
+    expect(restored.simpleJobIds).toEqual(['simple-one', 'simple-two']);
+    expect(restored).not.toHaveProperty('preparedRun');
+    expect(restored.settings.authorizedDomains).toEqual([]);
+    expect(restored.settings.stagingConfirmed).toBe(false);
+  });
+
   it('rejects corrupt device and history fields while preserving other valid profiles', async () => {
     const state = {
       ...initialData(),
@@ -249,7 +276,7 @@ describe('persistent state writer and recovery', () => {
     expect(valid.nextRunAt).toBe(nextRunAt);
   });
 
-  it('restores explicit recurring intent within current scope and excludes closed browsers', async () => {
+  it('preserves in-scope recurring templates for unused profiles without authorizing other hosts', async () => {
     const state = {
       ...initialData(),
       settings: { ...DEFAULT_SETTINGS, browserCount: 2, authorizedDomains: ['example.com'] },
@@ -268,6 +295,7 @@ describe('persistent state writer and recovery', () => {
     expect((await new LocalStore(directory).load()).scheduleTemplates).toEqual([
       { browserId: 1, url: 'https://example.com/path' },
       { browserId: 1, url: 'https://example.com/path' },
+      { browserId: 3, url: 'https://example.com/closed' },
     ]);
   });
 

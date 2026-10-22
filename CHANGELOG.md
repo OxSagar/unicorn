@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0-rc.3 — 2026-10-22
+
+- Replace the four-page interface with browser count, device type, pasted links, Distribute and Start on one screen.
+- Automatically spread links across the selected browsers; apply the selected real Chromium device preset at Start without a separate Apply step.
+- Bind Start to the exact prepared batch and visible website authorization; changing inputs requires redistribution.
+- Keep Stop available during preparation and proxy waits, and retain live browser previews with scroll-aware native clipping.
+- Run each accepted batch once and prevent saved recurrence from starting on app launch; preserve unrelated saved preferences, jobs and profile data.
+- Retain direct API proxy assignment, all eight eligible countries including Austria, and fixed proxy routing without direct fallback.
+
 ## 1.0.0-rc.2 — 2026-10-22
 
 - Assign eligible ProxyScrape endpoints directly from the API without preflight diagnostics, exit-IP verification, or measured-latency checks.

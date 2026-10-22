@@ -166,6 +166,20 @@ export function validateCommand(input: unknown): AppCommand {
     return { type } as AppCommand;
   }
   switch (type) {
+    case 'simple-distribute':
+      keys(value, ['type', 'text', 'count', 'device'], 'command');
+      if (typeof value.text !== 'string' || !value.text.trim() || value.text.length > 2_000_000)
+        throw new Error('Paste links using up to 2,000,000 characters');
+      return {
+        type,
+        text: value.text,
+        count: id(value.count),
+        device: enumeration(value.device, ['desktop', 'mobile', 'tablet'], 'device preset'),
+      };
+    case 'simple-start':
+      keys(value, ['type', 'reviewId', 'confirmed'], 'command');
+      if (value.confirmed !== true) throw new Error('Start requires explicit website authorization');
+      return { type, reviewId: string(value.reviewId, 'Review ID', 128), confirmed: true };
     case 'create':
       keys(value, ['type', 'count'], 'command');
       return { type, count: id(value.count) };

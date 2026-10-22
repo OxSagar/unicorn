@@ -1,23 +1,23 @@
-# Acceptance matrix — Unicorn 1.0.0-rc.2
+# Acceptance matrix — Unicorn 1.0.0-rc.3
 
-The 22 October update supersedes the original brief's pre-assignment proxy validation and extensive customization requirements: assign API-listed eligible-country proxies directly, add Austria, and provide a simpler interface. The stable IDs below retain the original requirement mapping.
+The latest 22 October user instruction supersedes the original extensive customization: expose only browser count, device type and links, followed by Distribute and Start. Proxy preflight remains removed and Austria remains eligible. The stable IDs below retain the original requirement mapping; internal compatibility APIs are distinguished from controls available to the user.
 
-This is an evaluation release candidate. The associated [release workflow](https://github.com/OxSagar/unicorn/actions) supplies the exact current unit/native counts, pass/fail/skipped results, Windows package launches and checksums. The [rc.1 record](verification.md) is historical; it does not verify changed rc.2 behavior. Test references below describe coverage and do not independently assert a completed run. The [original matrix](https://github.com/OxSagar/unicorn/blob/v1.0.0-rc.1/docs/acceptance.md) remains available at its version tag.
+This is an evaluation release candidate. The associated [release workflow](https://github.com/OxSagar/unicorn/actions) supplies the exact current unit/native counts, pass/fail/skipped results, Windows package launches and checksums. The [rc.1 record](verification.md) is historical; it does not verify changed rc.3 behavior. Test references below describe coverage and do not independently assert a completed run. The [original matrix](https://github.com/OxSagar/unicorn/blob/v1.0.0-rc.1/docs/acceptance.md) remains available at its version tag.
 
 ## Application, profiles and devices
 
-| ID  | Current implementation                                                       | Evidence / limit                                                                                                                 |
-| --- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| A01 | Modular source, lockfile, docs, CI and license notice                        | [Architecture](architecture.md); owner has not selected an open-source license                                                   |
-| A02 | Real Electron WebContentsView Chromium engines                               | [Native browser suite](../tests/e2e/browser.spec.ts); consumer Windows 10/11 matrix remains open                                 |
-| A03 | Every selectable count 1–20, individual/global lifecycle                     | Native all-count lifecycle and 1/5/10/15/20 concurrency; arbitrary heavy-site performance unverified                             |
-| A04 | Responsive grid, navigation, focus and workspace expansion                   | [UI suite](../tests/e2e/ui.spec.ts); no OS fullscreen browser mode or independent panel drag-resizing                            |
-| A05 | Chromium JavaScript, DOM, Fetch, WebSockets and persistent web stores        | Native browser/profile suites; representative fixtures do not establish complete forms/media/web-platform conformance            |
-| A06 | Manual downloads, ordinary dialogs and overlays                              | Source-reviewed; automated downloads denied; dedicated native download/consent acceptance remains open                           |
-| A07 | Persistent isolated website stores, device settings and saved URL history    | [Profile suite](../tests/e2e/profiles.spec.ts); native navigation stack does not persist; no arbitrary preferences/grants editor |
-| A08 | Cache/cookie/history cleanup, complete reset, storage usage, reopen          | Native profile cases; clear HTTP cache preserves CacheStorage; physical power-loss behavior unverified                           |
-| A09 | Desktop/mobile/tablet controls; existing custom profiles retained internally | Native presets/UI; custom controls removed from the interface by request; not physical-device equivalence                        |
-| A10 | Actual page diagnostics available in session inspection                      | Native device cases; no standalone diagnostics page                                                                              |
+| ID  | Current implementation                                                        | Evidence / limit                                                                                                                 |
+| --- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| A01 | Modular source, lockfile, docs, CI and license notice                         | [Architecture](architecture.md); owner has not selected an open-source license                                                   |
+| A02 | Real Electron WebContentsView Chromium engines                                | [Native browser suite](../tests/e2e/browser.spec.ts); consumer Windows 10/11 matrix remains open                                 |
+| A03 | Select 1–20 browsers without a separate Apply step; automatically assign work | Native all-count lifecycle and concurrency; minimal workflow tests; arbitrary heavy-site performance unverified                  |
+| A04 | Live browser previews, status and optional expansion on one scrolling screen  | UI/native clipping tests; address bars, per-profile controls and independent panel drag-resizing are absent                      |
+| A05 | Chromium JavaScript, DOM, Fetch, WebSockets and persistent web stores         | Native browser/profile suites; representative fixtures do not establish complete forms/media/web-platform conformance            |
+| A06 | Internal manual downloads/dialogs; automated QA downloads denied              | Source-reviewed; no manual-address flow in the minimal UI; broader download/desktop-event acceptance remains open                |
+| A07 | Persistent isolated website stores, device settings and saved URL history     | [Profile suite](../tests/e2e/profiles.spec.ts); native navigation stack does not persist; no arbitrary preferences/grants editor |
+| A08 | Existing profile stores retained; cleanup/reset/storage APIs kept internally  | Native profile cases; maintenance controls removed from the minimal UI; physical power-loss behavior unverified                  |
+| A09 | One Desktop/Mobile/Tablet choice applied to participating profiles at Start   | Native device/UI cases; unused custom profiles retained; device emulation is not physical-device equivalence                     |
+| A10 | Actual page/device diagnostics retained internally                            | Native device cases; no session inspector or diagnostics page in the ordinary UI                                                 |
 
 ## Proxies and authorization
 
@@ -34,35 +34,35 @@ This is an evaluation release candidate. The associated [release workflow](https
 
 ## Links, QA and interface
 
-| ID  | Current implementation                                                                   | Evidence / limit                                                                                                                       |
-| --- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| A19 | URL input/import, duplicate handling, exact persistent editor draft                      | UI and parsing suites; 2M-character bound; original imported file bytes are not archived                                               |
-| A20 | Same/round-robin/balanced/manual distribution and reviewed pending edits                 | Controller/UI suites; simpler ordinary workflow; balance is a heuristic, not continuous migration                                      |
-| A21 | Approved host scope, synthetic identification and staging confirmation                   | Scope/gate/native policy suites; required CDN/API hosts need approval for QA                                                           |
-| A22 | Landing/internal/approved-external QA with default stage settings                        | Native browser/policy suites use short timings; full default 200-second sequence not established by those tests                        |
-| A23 | Gradual scrolling with cancellation/pause checkpoints                                    | Control/native QA tests; complex nested/virtualized scrollers need broader acceptance                                                  |
-| A24 | Scoped anchor discovery and saved exclusions                                             | Policy/exclusion tests; URL navigation does not execute click handlers or JS-only routing                                              |
-| A25 | Reviewed Start, repeat toggle/interval, saved operating-window policy, Pause/Resume/Stop | Controller/UI and [three-cycle suite](../tests/e2e/stability.spec.ts); interactive session required; multi-day reliability unverified  |
-| A26 | Persisted daily navigation and HTTP/S/WebSocket-request budgets                          | Unit/native quota tests; advanced quota values are preserved internally, not exposed in simplified settings; WebSocket frames excluded |
-| A27 | Managed popup ownership, shared profile/proxy, inspection and dismissal                  | Native allowed/denied popup cases; eight children per profile; no independent OS popunder windows                                      |
-| A28 | Four sections: Browsers, Links, Proxies, Settings; dark/light themes                     | UI/native bounds and visual review; nine-section navigation and excessive customization removed by request                             |
-| A29 | Bounded structured logs, rotation, redaction and secondary export controls               | [Storage tests](../tests/unit/storage.test.ts); export uses retained records; broader native export acceptance open                    |
-| A30 | Local screenshots/timings/errors and results export                                      | QA suite/source review; results do not bundle captures; retained URLs/screenshots can contain test data                                |
+| ID  | Current implementation                                                            | Evidence / limit                                                                                                  |
+| --- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| A19 | Pasted URL list, automatic duplicate removal and persistent editor draft          | UI/parsing suites; bounded text; file-import button and custom duplicate options removed                          |
+| A20 | Automatic round-robin/repeated filling, immutable prepared batch, explicit Start  | Controller/UI suites; one link reaches all selected browsers; changed inputs require redistribution               |
+| A21 | Temporary exact-host approval from the displayed batch and deliberate Start       | Scope/gate/controller/native cases; unrelated CDN/API hosts stay blocked; no persisted blanket approval           |
+| A22 | Landing/internal/approved-external QA with default stage settings                 | Native browser/policy suites use short timings; full default 200-second sequence not established by those tests   |
+| A23 | Gradual scrolling with cancellation/pause checkpoints                             | Control/native QA tests; complex nested/virtualized scrollers need broader acceptance                             |
+| A24 | Scoped anchor discovery and saved exclusions                                      | Policy/exclusion tests; URL navigation does not execute click handlers or JS-only routing                         |
+| A25 | One accepted batch per Start, Stop, continuation after pause; no recurrence setup | Controller/UI cases; startup never arms saved recurrence; legacy scheduler tests remain internal coverage         |
+| A26 | Persisted daily navigation and HTTP/S/WebSocket-request budgets                   | Unit/native quota tests; advanced quota values are preserved internally; WebSocket frames excluded                |
+| A27 | Managed popup ownership, shared profile/proxy, inspection and dismissal           | Native allowed/denied popup cases; eight children per profile; no independent OS popunder windows                 |
+| A28 | One screen: browser count, device type, links, Distribute and Start               | UI/native bounds and visual review; no sidebar, Settings page, Apply step or extra customization                  |
+| A29 | Bounded structured logs, rotation and redaction; export API retained internally   | Storage tests; no export controls in the minimal flow; broader native export acceptance remains open              |
+| A30 | Local QA captures/timings/errors, inline run results                              | QA suite/source review; internal export does not bundle captures; retained URLs/screenshots may contain test data |
 
 ## Reliability and delivery
 
 | ID  | Current implementation                                                             | Evidence / limit                                                                                                                                        |
 | --- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A31 | Bounded queues/logs/captures, coalesced snapshots and memory deferral              | Unit/native resource cases; no validator sessions; no adaptive CPU concurrency; lists are paginated                                                     |
+| A31 | Bounded queues/logs/captures, coalesced snapshots and memory deferral              | Controller/core/native resource cases; no preflight sessions; no adaptive CPU-based concurrency                                                         |
 | A32 | Actual hosted Windows concurrency/resource measurements                            | Current release attachments; [rc.1 measurements](performance.md) are historical; consumer benchmarks remain open                                        |
 | A33 | Bounded approved-job renderer recovery, health probes and heartbeat                | [Recovery suite](../tests/e2e/recovery.spec.ts) and unit tests; no external frozen-main supervisor; manual/OOM/integrity/restriction cases are terminal |
-| A34 | Atomic state, profile flushes, saved recurrence and rc.1 settings migration        | Storage/controller/native profile cases; live scheduler process-kill and physical power-loss acceptance remain open                                     |
-| A35 | Tray/login controls, suspend pause and resume notice                               | Source review; native desktop-event acceptance incomplete; no automatic OS reconnect/resume                                                             |
+| A34 | Atomic state, profile flushes, retained preferences and inert saved jobs           | Storage/controller/native cases; temporary review approval never persists; physical power-loss acceptance remains open                                  |
+| A35 | Retained desktop preferences, tray stop and suspend pause                          | Source review; no desktop-preference settings page; broader native desktop-event acceptance incomplete                                                  |
 | A36 | Sandboxed remote content, isolation, restricted IPC, default-deny permissions, TLS | Unit/native privilege/package smokes; no credential vault or permission-grant editor; broader security audit open                                       |
 | A37 | Updated unit and real Windows Chromium/proxy/UI/failure suites                     | Current Actions reports are authoritative; provider outage, OS reconnect and live scheduling interruption gaps remain                                   |
 | A38 | Short three-cycle workload and documented 24-hour procedure                        | [Stability suite](../tests/e2e/stability.spec.ts); 24-hour soak remains unperformed; no production crash-rate claim                                     |
-| A39 | Windows installer/ZIP, actual package launches, checksums, gated versioned release | [Release workflow](../.github/workflows/release.yml); rc.2 remains an unsigned evaluation candidate                                                     |
-| A40 | Manual releases link                                                               | Automatic updates, optional installed-Chrome backend and Windows service remain absent                                                                  |
+| A39 | Windows installer/ZIP, actual package launches, checksums, gated versioned release | [Release workflow](../.github/workflows/release.yml); rc.3 remains an unsigned evaluation candidate                                                     |
+| A40 | Versioned GitHub releases; manual installation of updates                          | No automatic updater, independently installed Chrome backend or Windows service                                                                         |
 
 ## Promotion gates
 

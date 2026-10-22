@@ -1,527 +1,224 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { DEVICES } from '../shared/defaults';
-import type { AppSnapshot, BrowserSnapshot, ViewBounds } from '../shared/types';
-import { Badge, Button, duration, EmptyState, formatBytes, Icon, IconButton, Status } from './components';
-import type { Actions } from './ui-types';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import type { BrowserSnapshot, TestJob, ViewBounds } from '../shared/types';
+import { Button, Icon } from './components';
 
-interface Props extends Actions {
-  snapshot: AppSnapshot;
-  selected: number[];
-  setSelected: (ids: number[]) => void;
+interface Props {
+  browsers: BrowserSnapshot[];
+  allBrowserIds: number[];
+  jobs: TestJob[];
+  scrollRoot: RefObject<HTMLElement | null>;
   blocked: boolean;
-  busy: boolean;
 }
-export default function BrowserGrid({ snapshot, selected, setSelected, blocked, busy, ...actions }: Props) {
+
+const labels: Record<BrowserSnapshot['state'], string> = {
+  CREATED: 'Ready',
+  WAITING_FOR_PROXY: 'Waiting for proxy',
+  ASSIGNING_PROXY: 'Assigning proxy',
+  READY: 'Ready',
+  NAVIGATING: 'Loading',
+  RUNNING: 'Running',
+  COMPLETED: 'Completed',
+  PAUSED: 'Paused',
+  PROXY_FAILED: 'Proxy unavailable',
+  RETRY_WAIT: 'Retrying',
+  STOPPED: 'Stopped',
+  ERROR: 'Needs attention',
+};
+
+export default function BrowserGrid({ browsers, allBrowserIds, jobs, scrollRoot, blocked }: Props) {
   const [expanded, setExpanded] = useState<number | null>(null);
-  const [focusedId, setFocusedId] = useState<number | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const anchors = useRef(new Map<number, HTMLDivElement>());
-  const snapshotRef = useRef(snapshot);
-  const layoutRef = useRef({ blocked, expanded });
-  const layoutFrame = useRef<number | null>(null);
-  snapshotRef.current = snapshot;
-  layoutRef.current = { blocked, expanded };
+  const gridRef = useRef<HTMLDivElement>(null);
+  const frame = useRef<number | null>(null);
+  const current = useRef({ browsers, allBrowserIds, blocked, expanded });
+  current.current = { browsers, allBrowserIds, blocked, expanded };
+
   const emitLayout = useCallback(() => {
-    if (!window.unicorn || !scrollRef.current) return;
-    const clip = scrollRef.current.getBoundingClientRect();
-    const bounds: ViewBounds[] = snapshotRef.current.browsers.map((browser) => {
-      const node = anchors.current.get(browser.id);
-      if (
-        !node ||
-        layoutRef.current.blocked ||
-        (layoutRef.current.expanded !== null && layoutRef.current.expanded !== browser.id)
-      )
-        return { id: browser.id, x: 0, y: 0, width: 0, height: 0, visible: false };
+    if (!window.unicorn) return;
+    const root = scrollRoot.current;
+    const clip = root?.getBoundingClientRect();
+    const {
+      browsers: visibleBrowsers,
+      allBrowserIds: ids,
+      blocked: hidden,
+      expanded: focused,
+    } = current.current;
+    const bounds: ViewBounds[] = ids.map((id) => {
+      const browser = visibleBrowsers.find((item) => item.id === id);
+      const node = anchors.current.get(id);
+      const off = { id, x: 0, y: 0, width: 0, height: 0, visible: false };
+      if (!clip || !node || !browser || hidden || (focused !== null && focused !== id)) return off;
       const rect = node.getBoundingClientRect();
-      const x = Math.max(0, clip.left, rect.left),
-        y = Math.max(0, clip.top, rect.top);
-      const right = Math.min(window.innerWidth, clip.right, rect.right),
-        bottom = Math.min(window.innerHeight, clip.bottom, rect.bottom);
-      const width = Math.max(0, Math.floor(right - x)),
-        height = Math.max(0, Math.floor(bottom - y));
+      const x = Math.ceil(Math.max(0, clip.left, rect.left));
+      const y = Math.ceil(Math.max(0, clip.top, rect.top));
+      const right = Math.floor(Math.min(window.innerWidth, clip.right, rect.right));
+      const bottom = Math.floor(Math.min(window.innerHeight, clip.bottom, rect.bottom));
+      const width = Math.max(0, right - x);
+      const height = Math.max(0, bottom - y);
       return {
-        id: browser.id,
-        x: Math.round(x),
-        y: Math.round(y),
+        id,
+        x,
+        y,
         width,
         height,
-        visible: width > 24 && height > 24 && !!browser.url && browser.url !== 'about:blank',
+        visible: width > 24 && height > 24 && Boolean(browser.url && browser.url !== 'about:blank'),
       };
     });
     window.unicorn.layout(bounds);
-  }, []);
+  }, [scrollRoot]);
+
   const scheduleLayout = useCallback(() => {
-    if (layoutFrame.current !== null) cancelAnimationFrame(layoutFrame.current);
-    layoutFrame.current = requestAnimationFrame(() => {
-      layoutFrame.current = null;
+    if (frame.current !== null) cancelAnimationFrame(frame.current);
+    frame.current = requestAnimationFrame(() => {
+      frame.current = null;
       emitLayout();
     });
   }, [emitLayout]);
+
+  // The composer and previews share a scroller. Listen in capture phase so
+  // ancestor scrolling cannot leave native views over the composer or header.
   useEffect(() => {
     const observer = new ResizeObserver(scheduleLayout);
-    if (scrollRef.current) observer.observe(scrollRef.current);
+    if (scrollRoot.current) observer.observe(scrollRoot.current);
+    if (gridRef.current) observer.observe(gridRef.current);
+    let ancestor = gridRef.current?.parentElement;
+    while (ancestor && ancestor !== scrollRoot.current) {
+      observer.observe(ancestor);
+      ancestor = ancestor.parentElement;
+    }
     anchors.current.forEach((node) => observer.observe(node));
     window.addEventListener('resize', scheduleLayout);
+    window.addEventListener('scroll', scheduleLayout, true);
     scheduleLayout();
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', scheduleLayout);
+      window.removeEventListener('scroll', scheduleLayout, true);
     };
-  }, [scheduleLayout, snapshot.browsers.length, expanded, focusedId]);
-  useEffect(() => {
+  }, [browsers.length, expanded, scheduleLayout, scrollRoot]);
+
+  // Review/error messages and expansion can move an anchor
+  // without changing its own size. Refresh positions after every layout commit.
+  useLayoutEffect(() => {
     emitLayout();
-  }, [blocked, expanded, snapshot, emitLayout]);
+  });
+
   useEffect(
     () => () => {
-      if (layoutFrame.current !== null) cancelAnimationFrame(layoutFrame.current);
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
       window.unicorn?.layout(
-        snapshotRef.current.browsers.map((b) => ({
-          id: b.id,
-          x: 0,
-          y: 0,
-          width: 0,
-          height: 0,
-          visible: false,
-        })),
+        current.current.allBrowserIds.map((id) => ({ id, x: 0, y: 0, width: 0, height: 0, visible: false })),
       );
     },
     [],
   );
+
   useEffect(() => {
-    if (expanded !== null && !snapshot.browsers.some((b) => b.id === expanded)) setExpanded(null);
-    if (focusedId !== null && !snapshot.browsers.some((b) => b.id === focusedId)) setFocusedId(null);
-  }, [snapshot.browsers, expanded, focusedId]);
-  const focused = snapshot.browsers.find((b) => b.id === focusedId);
-  const visible = expanded === null ? snapshot.browsers : snapshot.browsers.filter((b) => b.id === expanded);
-  const allSelected = snapshot.browsers.length > 0 && snapshot.browsers.every((b) => selected.includes(b.id));
+    if (expanded !== null && !browsers.some((browser) => browser.id === expanded)) setExpanded(null);
+  }, [browsers, expanded]);
+
+  const visible = expanded === null ? browsers : browsers.filter((browser) => browser.id === expanded);
+  if (!browsers.length)
+    return (
+      <section className="preview-empty" aria-label="Browser previews">
+        <Icon name="browser" size={24} />
+        <p>Your browsers will appear here after you distribute links.</p>
+      </section>
+    );
+
   return (
-    <section className="browser-workspace">
-      <div className="workspace-toolbar simple-browser-toolbar">
-        <div className="toolbar-leading">
-          <label className="select-all">
-            <input
-              type="checkbox"
-              aria-label="Select all browsers"
-              checked={allSelected}
-              onChange={() => setSelected(allSelected ? [] : snapshot.browsers.map((browser) => browser.id))}
-            />
-            Select all
-          </label>
-          <span className="selection-count">{selected.length} selected</span>
-          <div className="preset-switcher" role="group" aria-label="Device for selected browsers">
-            {(['desktop', 'mobile', 'tablet'] as const).map((preset) => (
-              <button
-                key={preset}
-                type="button"
-                disabled={busy || !selected.length}
-                aria-pressed={
-                  selected.length > 0 &&
-                  snapshot.browsers
-                    .filter((browser) => selected.includes(browser.id))
-                    .every((browser) => browser.device.preset === preset)
-                }
-                title={`Apply ${preset} to selected browsers`}
-                onClick={() =>
-                  void actions.run(
-                    { type: 'device', ids: selected, device: DEVICES[preset] },
-                    `${preset[0].toUpperCase() + preset.slice(1)} applied to selected browsers.`,
-                  )
-                }
-              >
-                {preset[0].toUpperCase() + preset.slice(1)}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="toolbar-actions">
-          {expanded !== null && (
-            <Button icon="grid" onClick={() => setExpanded(null)}>
-              All browsers
-            </Button>
-          )}
-          <Button icon="link" onClick={() => actions.setPage('links')}>
-            Add links
+    <section className="browser-workspace" aria-label="Browser previews">
+      <div className="previews-heading">
+        <h2>Live browsers</h2>
+        {expanded !== null && (
+          <Button icon="grid" onClick={() => setExpanded(null)}>
+            Show all browsers
           </Button>
-        </div>
+        )}
       </div>
-      <div className={`workspace-body ${focused ? 'with-inspector' : ''}`}>
-        <div ref={scrollRef} className="browser-scroll" onScroll={scheduleLayout}>
-          {visible.length === 0 ? (
-            <EmptyState
-              title="Your workspace starts here"
-              action={
-                <Button
-                  variant="primary"
-                  onClick={() => void actions.run({ type: 'create', count: snapshot.settings.browserCount })}
-                  icon="plus"
-                >
-                  Create browsers
-                </Button>
-              }
-            >
-              Choose up to 20 independent profiles. Every session keeps its own cookies, cache, and website
-              storage.
-            </EmptyState>
-          ) : (
-            <div className={`browser-grid ${expanded !== null ? 'expanded' : ''}`}>
-              {visible.map((browser) => (
-                <BrowserCard
-                  key={browser.id}
-                  browser={browser}
-                  selected={selected.includes(browser.id)}
-                  focused={focusedId === browser.id}
-                  expanded={expanded === browser.id}
-                  setAnchor={(node) => {
-                    if (node) anchors.current.set(browser.id, node);
-                    else anchors.current.delete(browser.id);
-                    scheduleLayout();
-                  }}
-                  onSelect={() =>
-                    setSelected(
-                      selected.includes(browser.id)
-                        ? selected.filter((id) => id !== browser.id)
-                        : [...selected, browser.id],
-                    )
-                  }
-                  onFocus={() => setFocusedId(focusedId === browser.id ? null : browser.id)}
-                  onExpand={() => setExpanded(expanded === browser.id ? null : browser.id)}
-                  {...actions}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-        {focused && <BrowserInspector browser={focused} close={() => setFocusedId(null)} {...actions} />}
+      <div ref={gridRef} className={`browser-grid${expanded !== null ? ' expanded' : ''}`}>
+        {visible.map((browser) => {
+          const assigned = jobs.filter((job) => job.browserId === browser.id);
+          const completed = assigned.filter((job) => job.status === 'completed').length;
+          const hasPage = Boolean(browser.url && browser.url !== 'about:blank');
+          const failed = ['ERROR', 'PROXY_FAILED'].includes(browser.state);
+          const waiting = ['WAITING_FOR_PROXY', 'ASSIGNING_PROXY', 'RETRY_WAIT'].includes(browser.state);
+          return (
+            <article className="browser-card" key={browser.id} data-browser-id={browser.id}>
+              <header className="browser-card-heading">
+                <div className="browser-identity">
+                  <span className="browser-number">{String(browser.id).padStart(2, '0')}</span>
+                  <h3>Browser {browser.id}</h3>
+                </div>
+                <div className="browser-card-actions">
+                  <span
+                    className={`browser-state ${!blocked && failed ? 'error' : !blocked && waiting ? 'waiting' : ''}`}
+                  >
+                    <i aria-hidden="true" />
+                    {blocked ? 'Ready' : labels[browser.state]}
+                  </span>
+                  {expanded === null && (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={`Expand browser ${browser.id}`}
+                      title={`Expand browser ${browser.id}`}
+                      onClick={() => setExpanded(browser.id)}
+                    >
+                      <Icon name="expand" size={17} />
+                    </button>
+                  )}
+                </div>
+              </header>
+              <p
+                className="browser-location"
+                title={(blocked ? assigned[0]?.url : browser.url) || assigned[0]?.url || ''}
+              >
+                <Icon name="link" size={13} />
+                <span>
+                  {(blocked ? assigned[0]?.url : browser.url) || assigned[0]?.url || 'Ready for your links'}
+                </span>
+              </p>
+              <div
+                className="browser-viewport"
+                ref={(node) => {
+                  if (node) anchors.current.set(browser.id, node);
+                  else anchors.current.delete(browser.id);
+                  scheduleLayout();
+                }}
+              >
+                {(!hasPage || blocked) && (
+                  <div className="browser-placeholder">
+                    <Icon
+                      name={!blocked && waiting ? 'clock' : !blocked && failed ? 'info' : 'browser'}
+                      size={27}
+                    />
+                    <strong>
+                      {!blocked && waiting
+                        ? labels[browser.state]
+                        : !blocked && failed
+                          ? 'Unable to load'
+                          : 'Ready to start'}
+                    </strong>
+                    <p>
+                      {!blocked && waiting
+                        ? 'An eligible proxy is assigned automatically.'
+                        : !blocked && failed
+                          ? 'Review the error below, then distribute again to retry.'
+                          : 'Your page opens when you select Start.'}
+                    </p>
+                  </div>
+                )}
+              </div>
+              <footer className="browser-card-footer">
+                <span>{blocked ? 'Waiting for Start' : browser.stage || labels[browser.state]}</span>
+                {!blocked && assigned.length > 0 && <span>{completed} complete</span>}
+              </footer>
+              {!blocked && browser.lastError && <p className="browser-error">{browser.lastError}</p>}
+            </article>
+          );
+        })}
       </div>
     </section>
-  );
-}
-
-function BrowserCard({
-  browser,
-  selected,
-  focused,
-  expanded,
-  setAnchor,
-  onSelect,
-  onFocus,
-  onExpand,
-  ...actions
-}: Actions & {
-  browser: BrowserSnapshot;
-  selected: boolean;
-  focused: boolean;
-  expanded: boolean;
-  setAnchor: (node: HTMLDivElement | null) => void;
-  onSelect: () => void;
-  onFocus: () => void;
-  onExpand: () => void;
-}) {
-  const [address, setAddress] = useState(browser.url || '');
-  const [editing, setEditing] = useState(false);
-  useEffect(() => {
-    if (!editing) setAddress(browser.url || '');
-  }, [browser.url, editing]);
-  const invoke = (
-    action: 'back' | 'forward' | 'reload' | 'stop-loading' | 'start' | 'pause' | 'resume' | 'stop',
-  ) => void actions.run({ type: 'browser', id: browser.id, action });
-  return (
-    <article
-      className={`browser-card ${selected ? 'selected' : ''} ${focused ? 'focused' : ''}`}
-      data-browser-id={browser.id}
-    >
-      <div className="browser-card-heading">
-        <label className="browser-label">
-          <input
-            type="checkbox"
-            aria-label={`Select browser ${browser.id}`}
-            checked={selected}
-            onChange={onSelect}
-          />
-          <span className="browser-number">{String(browser.id).padStart(2, '0')}</span>
-          <strong title={browser.name}>{browser.name}</strong>
-        </label>
-        <div className="card-heading-actions">
-          <Status state={browser.state} />
-          <IconButton icon="info" label={`Inspect browser ${browser.id}`} onClick={onFocus} />
-          <IconButton
-            icon="expand"
-            label={expanded ? 'Exit expanded browser' : `Expand browser ${browser.id}`}
-            onClick={onExpand}
-          />
-        </div>
-      </div>
-      <form
-        className="address-bar"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setEditing(false);
-          if (address.trim()) void actions.run({ type: 'navigate', id: browser.id, url: address.trim() });
-        }}
-      >
-        <IconButton icon="back" label="Back" disabled={!browser.canGoBack} onClick={() => invoke('back')} />
-        <IconButton
-          icon="forward"
-          label="Forward"
-          disabled={!browser.canGoForward}
-          onClick={() => invoke('forward')}
-        />
-        <IconButton
-          icon={browser.loading ? 'close' : 'reload'}
-          label={browser.loading ? 'Stop loading' : 'Reload'}
-          onClick={() => invoke(browser.loading ? 'stop-loading' : 'reload')}
-        />
-        <div className="address-input">
-          <Icon name="shield" size={13} />
-          <input
-            aria-label={`Address for browser ${browser.id}`}
-            value={address}
-            placeholder="https://your-authorized-site.com"
-            onFocus={() => setEditing(true)}
-            onBlur={() => setEditing(false)}
-            onChange={(e) => setAddress(e.target.value)}
-            spellCheck={false}
-          />
-          <button type="submit" aria-label="Navigate">
-            <Icon name="arrow" size={14} />
-          </button>
-        </div>
-      </form>
-      <div className="browser-viewport" ref={setAnchor}>
-        {(!browser.url || browser.url === 'about:blank') && (
-          <div className="browser-placeholder">
-            <div className="placeholder-orbit">
-              <Icon name="browser" size={29} />
-              <i />
-            </div>
-            <strong>
-              {['WAITING_FOR_PROXY', 'ASSIGNING_PROXY'].includes(browser.state)
-                ? 'Assigning a proxy'
-                : 'Ready to browse'}
-            </strong>
-            <span>
-              {['WAITING_FOR_PROXY', 'ASSIGNING_PROXY'].includes(browser.state)
-                ? 'Waiting for an eligible API-listed endpoint.'
-                : 'Enter an approved URL above or add links to the queue.'}
-            </span>
-            <span className="placeholder-caption">
-              <Icon name="shield" size={12} />
-              Separate profile · Proxy required
-            </span>
-          </div>
-        )}
-      </div>
-      {browser.loading && <div className="loading-line" />}
-      <div className="browser-card-footer">
-        <div className="browser-tags">
-          <span title={`Viewport ${browser.device.width} × ${browser.device.height}`}>
-            <Icon name="device" size={13} />
-            {browser.device.preset}
-          </span>
-          <span className={browser.proxy ? 'connected' : ''}>
-            <Icon name="globe" size={13} />
-            {browser.proxy
-              ? `${browser.proxy.country} · ${browser.proxy.protocol.toUpperCase()}`
-              : 'No proxy'}
-          </span>
-          {browser.elapsedMs > 0 && (
-            <span title={browser.stage}>
-              <Icon name="clock" size={13} />
-              {duration(browser.elapsedMs)}
-            </span>
-          )}
-        </div>
-        <div className="inline-controls">
-          <IconButton
-            icon="play"
-            label={`Start browser ${browser.id} test`}
-            onClick={() => invoke(browser.state === 'PAUSED' ? 'resume' : 'start')}
-          />
-          <IconButton
-            icon="pause"
-            label={`Pause browser ${browser.id} test`}
-            onClick={() => invoke('pause')}
-            disabled={browser.state === 'PAUSED'}
-          />
-          <IconButton icon="stop" label={`Stop browser ${browser.id}`} onClick={() => invoke('stop')} />
-        </div>
-      </div>
-      {browser.lastError && (
-        <div className="browser-error" title={browser.lastError}>
-          <Icon name="info" size={12} />
-          {browser.lastError}
-        </div>
-      )}
-    </article>
-  );
-}
-
-function BrowserInspector({
-  browser,
-  close,
-  ...actions
-}: Actions & { browser: BrowserSnapshot; close: () => void }) {
-  const profileAction = (action: 'cache' | 'cookies' | 'permissions' | 'history' | 'reset' | 'storage') => {
-    if (action === 'storage') {
-      void actions.run({ type: 'profile', id: browser.id, action }).then((result) => {
-        if (result?.storageBytes !== undefined)
-          actions.inspect(
-            'Profile storage',
-            <p>
-              Browser {browser.id} currently uses <strong>{formatBytes(result.storageBytes)}</strong> on disk.
-            </p>,
-          );
-      });
-      return;
-    }
-    actions.confirm(
-      action === 'reset' ? 'Reset this browser profile?' : `Clear ${action}?`,
-      action === 'reset'
-        ? `Cookies, cache, site data, permissions, and history for Browser ${browser.id} will be removed. This cannot be undone.`
-        : `This removes stored ${action} from Browser ${browser.id}. Other profiles keep their data.`,
-      () => {
-        void actions.run(
-          { type: 'profile', id: browser.id, action },
-          `Browser ${browser.id} ${action} cleared.`,
-        );
-      },
-      true,
-    );
-  };
-  return (
-    <aside className="browser-inspector">
-      <header>
-        <div>
-          <p className="eyebrow">SESSION DETAILS</p>
-          <h3>Browser {String(browser.id).padStart(2, '0')}</h3>
-        </div>
-        <IconButton icon="close" label="Close session inspector" onClick={close} />
-      </header>
-      <Status state={browser.state} />
-      <dl>
-        <dt>Page title</dt>
-        <dd>{browser.title || 'No page loaded'}</dd>
-        <dt>Current URL</dt>
-        <dd className="break-word">{browser.url || '—'}</dd>
-        <dt>Device</dt>
-        <dd>
-          {browser.device.preset} · {browser.device.width} × {browser.device.height}
-        </dd>
-        <dt>Pixel ratio / touch</dt>
-        <dd>
-          {browser.device.scaleFactor}× / {browser.device.touch ? 'Enabled' : 'Disabled'}
-        </dd>
-        <dt>Proxy · API country</dt>
-        <dd>
-          {browser.proxy
-            ? `${browser.proxy.country} · ${browser.proxy.ip}:${browser.proxy.port}`
-            : 'Not assigned'}
-        </dd>
-        <dt>JavaScript</dt>
-        <dd>Enabled · {browser.jsErrors} errors</dd>
-        <dt>Current stage</dt>
-        <dd>{browser.stage || 'Idle'}</dd>
-        <dt>Network errors</dt>
-        <dd>{browser.networkErrors}</dd>
-        <dt>Elapsed</dt>
-        <dd>{duration(browser.elapsedMs)}</dd>
-      </dl>
-      <details className="inspector-details">
-        <summary>Troubleshooting</summary>
-        <div>
-          <Button
-            icon="terminal"
-            onClick={() =>
-              void actions.run({ type: 'diagnostic', id: browser.id }).then((result) => {
-                if (result?.diagnostic)
-                  actions.inspect(
-                    `Browser ${browser.id} diagnostics`,
-                    <pre className="diagnostic-json">{JSON.stringify(result.diagnostic, null, 2)}</pre>,
-                  );
-              })
-            }
-          >
-            Check device behavior
-          </Button>
-          <Button
-            icon="terminal"
-            variant="ghost"
-            onClick={() => void actions.run({ type: 'browser', id: browser.id, action: 'devtools' })}
-          >
-            Open developer tools
-          </Button>
-        </div>
-      </details>
-      {browser.popups.length > 0 && (
-        <section className="inspector-section">
-          <h4>
-            Child windows <Badge>{browser.popups.length}</Badge>
-          </h4>
-          {browser.popups.map((p) => (
-            <div className="popup-row" key={p.id}>
-              <span title={p.url}>{p.title || p.url}</span>
-              <IconButton
-                icon="expand"
-                label="Inspect popup"
-                onClick={() =>
-                  void actions.run({ type: 'popup', browserId: browser.id, popupId: p.id, action: 'inspect' })
-                }
-              />
-              <IconButton
-                icon="close"
-                label="Close popup"
-                onClick={() =>
-                  void actions.run({ type: 'popup', browserId: browser.id, popupId: p.id, action: 'close' })
-                }
-              />
-            </div>
-          ))}
-        </section>
-      )}
-      <details className="inspector-details">
-        <summary>Profile data</summary>
-        <div className="profile-controls">
-          {(['cache', 'cookies', 'permissions', 'history'] as const).map((action) => (
-            <Button key={action} variant="ghost" onClick={() => profileAction(action)}>
-              Clear {action}
-            </Button>
-          ))}
-          <Button variant="ghost" onClick={() => profileAction('storage')}>
-            Inspect storage
-          </Button>
-          <Button variant="danger" onClick={() => profileAction('reset')}>
-            Reset complete profile
-          </Button>
-        </div>
-      </details>
-      <details className="inspector-details">
-        <summary>Recent history</summary>
-        {browser.history.length ? (
-          browser.history
-            .slice(-8)
-            .reverse()
-            .map((entry, i) => (
-              <p className="history-entry" key={`${entry.at}-${i}`} title={entry.url}>
-                {entry.title || entry.url}
-                <small>{new Date(entry.at).toLocaleTimeString()}</small>
-              </p>
-            ))
-        ) : (
-          <p className="muted">No saved navigation yet.</p>
-        )}
-      </details>
-      <Button
-        variant="danger"
-        onClick={() =>
-          actions.confirm(
-            'Close this browser?',
-            'The session will stop. Its persistent profile remains available when reopened.',
-            () => void actions.run({ type: 'browser', id: browser.id, action: 'close' }),
-          )
-        }
-      >
-        Close browser
-      </Button>
-    </aside>
   );
 }

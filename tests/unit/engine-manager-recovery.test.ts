@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { BrowserWindow, Session, WebContentsView } from 'electron';
-import { BrowserManager } from '../../src/main/browser/manager';
+import { BrowserManager, type BrowserManagerOptions } from '../../src/main/browser/manager';
 import { RendererCrashError } from '../../src/main/browser/recovery';
 import { SiteRestrictionError } from '../../src/main/network/site-restriction';
 import type { GateHooks } from '../../src/main/network/session-gate';
 import type { QaHooks } from '../../src/main/qa/stages';
 import { DEFAULT_SETTINGS, DEVICES } from '../../src/shared/defaults';
-import type { ProxyRecord } from '../../src/shared/types';
+import type { AppSettings, ProxyRecord } from '../../src/shared/types';
 
 const native = vi.hoisted(() => ({
   newView: vi.fn(),
@@ -135,7 +135,10 @@ let views: ViewDouble[];
 let sessions: Map<string, SessionDouble>;
 const managers = new Set<BrowserManager>();
 
-async function setup(retryLimit = 2) {
+async function setup(
+  retryLimit = 2,
+  options: Partial<Pick<BrowserManagerOptions, 'settings' | 'requestAllowed' | 'navigationAllowed'>> = {},
+) {
   const settings = structuredClone(DEFAULT_SETTINGS);
   settings.authorizedDomains = ['authorized.test'];
   settings.stagingConfirmed = true;
@@ -143,6 +146,7 @@ async function setup(retryLimit = 2) {
   const acquire = vi.fn(async () => ({ ...proxy }));
   const release = vi.fn(async (_id: number, _reason?: string) => undefined);
   const log = vi.fn();
+  const saveProfile = vi.fn();
   const window = {
     contentView: { addChildView: vi.fn(), removeChildView: vi.fn() },
     getContentBounds: () => ({ width: 1200, height: 800 }),
@@ -153,7 +157,8 @@ async function setup(retryLimit = 2) {
     proxies: { acquire, release },
     changed: vi.fn(),
     log,
-    profileData: { load: () => ({ device: { ...DEVICES.mobile }, history: [] }), save: vi.fn() },
+    profileData: { load: () => ({ device: { ...DEVICES.mobile }, history: [] }), save: saveProfile },
+    ...options,
   });
   managers.add(manager);
   await manager.create(1);
@@ -162,6 +167,7 @@ async function setup(retryLimit = 2) {
     acquire,
     release,
     log,
+    saveProfile,
     settings,
     first: views[0].webContents,
     session: views[0].webContents.session,
@@ -200,6 +206,153 @@ afterEach(async () => {
   managers.clear();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('per-profile reviewed-run settings', () => {
+  function settingsFor(host: string): AppSettings {
+    return {
+      ...structuredClone(DEFAULT_SETTINGS),
+      authorizedDomains: [host],
+      stagingConfirmed: true,
+      retryLimit: 0,
+    };
+  }
+
+  it('keeps simultaneous QA scopes and request budgets bound to their own profiles', async () => {
+    const saved = settingsFor('saved.example.test');
+    const profiles = new Map([
+      [1, settingsFor('first.example.test')],
+      [2, settingsFor('second.example.test')],
+    ]);
+    const requestAllowed = vi.fn();
+    const navigationAllowed = vi.fn();
+    const { manager } = await setup(0, {
+      settings: (id) => profiles.get(id ?? 0) ?? saved,
+      requestAllowed,
+      navigationAllowed,
+    });
+    await manager.create(2);
+    const firstUrl = 'https://first.example.test/landing';
+    const secondUrl = 'https://second.example.test/landing';
+    native.stages.mockImplementation(async (url: string, hooks: QaHooks) => {
+      expect(hooks.settings().authorizedDomains).toEqual([new URL(url).hostname]);
+      await hooks.navigate(url);
+      await hooks.control.wait(1000);
+    });
+    const runs = [manager.runQa(1, firstUrl), manager.runQa(2, secondUrl)];
+    await vi.advanceTimersByTimeAsync(0);
+    const [firstGate, secondGate] = views.map((view) => view.webContents.session.gate!);
+    firstGate.hooks.approveRequest!(firstUrl);
+    firstGate.hooks.approveNavigation(firstUrl, true);
+    secondGate.hooks.approveRequest!(secondUrl);
+    secondGate.hooks.approveNavigation(secondUrl, true);
+    expect(requestAllowed.mock.calls).toEqual([
+      [firstUrl, 1],
+      [secondUrl, 2],
+    ]);
+    expect(navigationAllowed.mock.calls).toEqual([
+      [firstUrl, 1],
+      [secondUrl, 2],
+    ]);
+    expect(() => firstGate.hooks.approveNavigation(secondUrl, false)).toThrow(/outside the authorized/);
+    expect(() => secondGate.hooks.approveNavigation(firstUrl, false)).toThrow(/outside the authorized/);
+    await expect(manager.navigate(2, firstUrl)).rejects.toThrow(/outside the authorized/);
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.all(runs);
+    expect(manager.snapshots().map((browser) => browser.state)).toEqual(['COMPLETED', 'COMPLETED']);
+    expect(saved.authorizedDomains).toEqual(['saved.example.test']);
+  });
+
+  it('revokes a reviewed host without falling back to broader saved navigation or popup scope', async () => {
+    const saved = settingsFor('authorized.test');
+    let reviewed = settingsFor('authorized.test');
+    const { manager, first, acquire, session } = await setup(0, {
+      settings: (id) => (id === 1 ? reviewed : saved),
+    });
+    await manager.navigate(1, target);
+    reviewed = { ...reviewed, authorizedDomains: [], stagingConfirmed: false };
+    expect(() => session.gate!.hooks.approveNavigation(target, true)).toThrow(/outside the authorized/);
+    for (const eventName of ['will-navigate', 'will-redirect']) {
+      const event = { preventDefault: vi.fn() };
+      first.emit(eventName, event, target);
+      expect(event.preventDefault).toHaveBeenCalledOnce();
+    }
+    const openPopup = first.setWindowOpenHandler.mock.calls[0][0] as (details: { url: string }) => {
+      action: string;
+    };
+    expect(openPopup({ url: target })).toEqual({ action: 'deny' });
+    await expect(manager.navigate(1, target)).rejects.toThrow(/outside the authorized/);
+    await expect(manager.runQa(1, target)).rejects.toThrow(/outside the authorized/);
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(saved.authorizedDomains).toEqual(['authorized.test']);
+    await manager.stop(1);
+    expect(session.gate?.isEnabled).toBe(false);
+    expect(manager.snapshots()[0].proxy).toBeUndefined();
+  });
+});
+
+describe('reviewed Start device cancellation', () => {
+  it.each(['review cancellation', 'manager Stop'] as const)(
+    'retires pending CDP work on %s without changing a newer preset or the next profile',
+    async (source) => {
+      const { manager, first, session, acquire, saveProfile } = await setup();
+      await manager.create(2);
+      let completeOldCommand!: () => void;
+      native.applyDevice.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            completeOldCommand = resolve;
+          }),
+      );
+      const controller = new AbortController();
+      const outcome = manager.applyDevice([1, 2], DEVICES.tablet, controller.signal).catch((error) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.gate?.isEnabled).toBe(false);
+      if (source === 'review cancellation') controller.abort(new Error('Review cancelled by Stop'));
+      else await manager.stop(1);
+      expect(String(await outcome)).toMatch(/Stop|Stopped/);
+      expect(first.isDestroyed()).toBe(true);
+      expect(manager.snapshots().map((browser) => browser.device)).toEqual([DEVICES.mobile, DEVICES.mobile]);
+      expect(saveProfile.mock.calls.every(([, data]) => data.device.preset === 'mobile')).toBe(true);
+      expect(acquire).not.toHaveBeenCalled();
+
+      await manager.applyDevice([1], DEVICES.desktop, new AbortController().signal);
+      const replacement = manager.getWebContents(1);
+      expect(replacement).not.toBe(first);
+      completeOldCommand();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(manager.getWebContents(1)).toBe(replacement);
+      expect(manager.snapshots().map((browser) => browser.device)).toEqual([DEVICES.desktop, DEVICES.mobile]);
+      expect(session.gate?.isEnabled).toBe(false);
+      expect(acquire).not.toHaveBeenCalled();
+    },
+  );
+
+  it('bounds an unsettled device change and retains its last saved preset', async () => {
+    const { manager, first, session, saveProfile } = await setup();
+    native.applyDevice.mockImplementationOnce(() => new Promise<void>(() => undefined));
+    const outcome = manager
+      .applyDevice([1], DEVICES.tablet, new AbortController().signal)
+      .catch((error) => error);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(String(await outcome)).toContain('timed out after 10000 ms');
+    expect(first.isDestroyed()).toBe(true);
+    expect(manager.snapshots()[0].device).toEqual(DEVICES.mobile);
+    expect(saveProfile.mock.calls.every(([, data]) => data.device.preset === 'mobile')).toBe(true);
+    expect(session.gate?.isEnabled).toBe(false);
+  });
+
+  it('rejects an already cancelled Start without issuing a device command', async () => {
+    const { manager } = await setup();
+    native.applyDevice.mockClear();
+    const controller = new AbortController();
+    controller.abort(new Error('Stopped before configuration'));
+    await expect(manager.applyDevice([1], DEVICES.tablet, controller.signal)).rejects.toThrow(
+      'Stopped before configuration',
+    );
+    expect(native.applyDevice).not.toHaveBeenCalled();
+    expect(manager.snapshots()[0].device).toEqual(DEVICES.mobile);
+  });
 });
 
 describe('direct endpoint assignment failures', () => {

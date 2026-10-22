@@ -3,9 +3,12 @@ import type { BrowserWindow } from 'electron';
 import { UnicornController } from '../../src/main/controller';
 import { BrowserManager } from '../../src/main/browser/manager';
 import { ActivityLog, initialData, LocalStore, type StoredData } from '../../src/main/storage';
-import { DEVICES } from '../../src/shared/defaults';
-import type { AppCommand, BrowserSnapshot, TestJob } from '../../src/shared/types';
+import { DEFAULT_SETTINGS, DEVICES } from '../../src/shared/defaults';
+import type { AppCommand, BrowserSnapshot, DeviceConfig, TestJob } from '../../src/shared/types';
 import { SiteRestrictionError } from '../../src/main/network/site-restriction';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 vi.mock('electron', () => ({
   app: {
@@ -39,6 +42,7 @@ class BrowserDouble {
   private holds = new Map<string, ReturnType<typeof deferred>>();
   private inFlight = new Map<number, ReturnType<typeof deferred>>();
   readonly failures = new Map<string, Error>();
+  readonly waiting = new Set<string>();
 
   private browser(id: number): BrowserSnapshot {
     const browser = this.browsers.get(id);
@@ -87,6 +91,10 @@ class BrowserDouble {
     browser.url = url;
     browser.state = 'RUNNING';
     try {
+      if (this.waiting.has(url)) {
+        browser.state = 'WAITING_FOR_PROXY';
+        throw new Error('Waiting for an eligible proxy');
+      }
       const error = this.failures.get(url);
       if (error) throw error;
       const hold = this.holds.get(url);
@@ -97,7 +105,7 @@ class BrowserDouble {
       }
       browser.state = 'COMPLETED';
     } catch (error) {
-      browser.state = 'ERROR';
+      if (browser.state !== 'WAITING_FOR_PROXY') browser.state = 'ERROR';
       throw error;
     } finally {
       this.inFlight.delete(id);
@@ -115,6 +123,15 @@ class BrowserDouble {
   readonly stop = vi.fn(async (id: number) => {
     this.inFlight.get(id)?.reject(new Error('Stopped by user'));
     this.browser(id).state = 'STOPPED';
+  });
+
+  readonly applyDevice = vi.fn(async (ids: number[], device: DeviceConfig, signal?: AbortSignal) => {
+    signal?.throwIfAborted();
+    for (const id of ids) {
+      await this.stop(id);
+      signal?.throwIfAborted();
+      this.browser(id).device = structuredClone(device);
+    }
   });
 
   readonly action = vi.fn(async (id: number, action: string) => {
@@ -188,6 +205,7 @@ async function setup(data = state()) {
     manager,
     store,
     logs,
+    options: vi.mocked(BrowserManager).mock.calls.at(-1)![0],
     saved: () => structuredClone(saved),
     urls: () => manager.runQa.mock.calls.map(([, url]) => url),
     assign: async (id: number, urls: string[]) =>
@@ -209,6 +227,379 @@ afterEach(async () => {
   controllers.clear();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('reviewed count, device, paste, distribute, Start workflow', () => {
+  const REVIEWED = 'https://reviewed.example/landing';
+  const prepare = async (
+    controller: UnicornController,
+    text = REVIEWED,
+    count = 1,
+    device: 'desktop' | 'mobile' | 'tablet' = 'desktop',
+  ) => (await controller.command({ type: 'simple-distribute', text, count, device })).snapshot.preparedRun!;
+  const start = (controller: UnicornController, reviewId: string) =>
+    controller.command({ type: 'simple-start', reviewId, confirmed: true });
+
+  it('upgrades a full legacy queue and redistributes after restart without losing old work or restoring approval', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'unicorn-simple-upgrade-'));
+    try {
+      const data = state(2);
+      const legacy = Array.from({ length: 1000 }, (_, index) => ({
+        ...historicalJob(`legacy-${index}`, 1, `https://authorized.test/legacy-${index}`),
+        status: 'pending' as const,
+      }));
+      data.jobs = structuredClone(legacy);
+      data.settings.schedule.resumeAfterRestart = true;
+      data.scheduleTemplates = [{ browserId: 2, url: SECOND }];
+      const original = await setup(data);
+      const first = await prepare(original.controller, REVIEWED, 20, 'mobile');
+      expect(original.controller.snapshot().jobs).toHaveLength(20);
+      expect(original.controller.snapshot().preservedJobs).toEqual(legacy);
+      await original.close();
+      const disk = new LocalStore(directory);
+      await disk.save(original.saved());
+      const restored = await disk.load();
+      expect(restored.simpleJobIds).toEqual(first.jobIds);
+      expect(restored.preservedJobs).toEqual(legacy);
+      const restarted = await setup(restored);
+      await vi.advanceTimersByTimeAsync(INTERVAL * 2);
+      expect(restarted.urls()).toEqual([]);
+      expect(restarted.controller.snapshot().preparedRun).toBeNull();
+      await expect(start(restarted.controller, first.id)).rejects.toThrow(/Distribute/);
+      const next = await prepare(restarted.controller, 'https://another.example/new', 1, 'tablet');
+      expect(next.jobIds).toHaveLength(1);
+      expect(restarted.controller.snapshot().jobs).toHaveLength(1);
+      expect(restarted.controller.snapshot().preservedJobs).toEqual(legacy);
+      await start(restarted.controller, next.id);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(restarted.urls()).toEqual(['https://another.example/new']);
+      expect(restarted.controller.snapshot().settings.authorizedDomains).toEqual([
+        'authorized.test',
+        'other.test',
+      ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('prepares exact immutable choices without navigation, device writes, or stored approval changes', async () => {
+    const data = state(4);
+    const old = { ...historicalJob('saved-pending', 1, FIRST), status: 'pending' as const };
+    data.jobs = [old];
+    const before = structuredClone(data.settings);
+    const { controller, manager, options } = await setup(data);
+    const plan = await prepare(controller, `${REVIEWED}\nhttps://second.example/`, 3, 'tablet');
+    expect(plan).toMatchObject({
+      count: 3,
+      device: 'tablet',
+      browserIds: [1, 2, 3],
+      domains: ['reviewed.example', 'second.example'],
+      status: 'ready',
+    });
+    expect(plan.jobIds).toHaveLength(3);
+    expect(manager.create).toHaveBeenCalledTimes(1);
+    expect(manager.applyDevice).not.toHaveBeenCalled();
+    expect(manager.runQa).not.toHaveBeenCalled();
+    expect(controller.snapshot().preservedJobs.find((job) => job.id === old.id)).toEqual(old);
+    expect(options.settings(1)).toEqual(before);
+    plan.domains.push('evil.test');
+    plan.browserIds.push(20);
+    plan.device = 'mobile';
+    plan.count = 20;
+    expect(controller.snapshot().preparedRun).toMatchObject({
+      count: 3,
+      device: 'tablet',
+      browserIds: [1, 2, 3],
+      domains: ['reviewed.example', 'second.example'],
+    });
+    expect(controller.snapshot().settings).toEqual(before);
+  });
+
+  it('runs only reviewed jobs once under ephemeral exact-host defaults and preserves hidden settings/templates', async () => {
+    const data = state(4);
+    data.settings.timings.landingWaitMs = 3_600_000;
+    data.settings.retryLimit = 5;
+    data.settings.schedule.resumeAfterRestart = true;
+    data.scheduleTemplates = [{ browserId: 4, url: FIRST }];
+    data.nextRunAt = Date.now() - 1;
+    const old = { ...historicalJob('legacy', 1, FIRST), status: 'pending' as const };
+    data.jobs = [old];
+    const before = structuredClone(data.settings);
+    const { controller, manager, options, urls, saved } = await setup(data);
+    await vi.advanceTimersByTimeAsync(INTERVAL * 2);
+    expect(urls()).toEqual([]);
+    const held = manager.hold(REVIEWED);
+    const plan = await prepare(controller, REVIEWED, 1, 'mobile');
+    await start(controller, plan.id);
+    expect(manager.applyDevice).toHaveBeenCalledWith([1], DEVICES.mobile, expect.any(AbortSignal));
+    expect(options.settings(1)).toMatchObject({
+      authorizedDomains: ['reviewed.example'],
+      stagingConfirmed: true,
+      retryLimit: 2,
+      schedule: { enabled: false },
+    });
+    expect(options.settings(1).timings).toEqual(DEFAULT_SETTINGS.timings);
+    expect(options.settings(2)).toEqual({ ...before, browserCount: 1 });
+    expect(controller.snapshot().settings).toEqual({ ...before, browserCount: 1 });
+    held.resolve();
+    await vi.advanceTimersByTimeAsync(INTERVAL * 3);
+    expect(urls()).toEqual([REVIEWED]);
+    expect(controller.snapshot().preparedRun?.status).toBe('finished');
+    expect(controller.snapshot().preservedJobs.find((job) => job.id === old.id)).toEqual(old);
+    expect(options.settings(1)).toEqual({ ...before, browserCount: 1 });
+    expect(saved().scheduleTemplates).toEqual([{ browserId: 4, url: FIRST }]);
+    await expect(start(controller, plan.id)).rejects.toThrow(/Distribute/);
+    expect(urls()).toEqual([REVIEWED]);
+  });
+
+  it('preserves inactive saved recurrence when emergency Stop is used before any distribution', async () => {
+    const data = state(2);
+    data.settings.schedule.resumeAfterRestart = true;
+    data.scheduleTemplates = [{ browserId: 2, url: SECOND }];
+    data.nextRunAt = Date.now() - 1;
+    const before = structuredClone(data);
+    const { controller, urls, saved } = await setup(data);
+    await controller.command({ type: 'global', action: 'stop' });
+    await vi.advanceTimersByTimeAsync(INTERVAL * 2);
+    expect(controller.snapshot().settings).toEqual(before.settings);
+    expect(saved().scheduleTemplates).toEqual(before.scheduleTemplates);
+    expect(saved().nextRunAt).toBe(before.nextRunAt);
+    expect(urls()).toEqual([]);
+    expect(controller.snapshot().scheduler.running).toBe(false);
+  });
+
+  it('replaces only the previous unstarted review and rejects a stale count/device token', async () => {
+    const data = state(1);
+    data.jobs = [{ ...historicalJob('legacy', 1, FIRST), status: 'pending' }];
+    const { controller, manager, urls } = await setup(data);
+    const original = await prepare(controller, REVIEWED, 1, 'desktop');
+    const next = await prepare(controller, REVIEWED, 3, 'tablet');
+    expect(next.id).not.toBe(original.id);
+    expect(controller.snapshot().jobs.filter((job) => original.jobIds.includes(job.id))).toEqual([]);
+    expect(controller.snapshot().preservedJobs.some((job) => job.id === 'legacy')).toBe(true);
+    expect(manager.create).toHaveBeenLastCalledWith(3);
+    await expect(start(controller, original.id)).rejects.toThrow(/current review/);
+    await start(controller, next.id);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(urls()).toEqual([REVIEWED, REVIEWED, REVIEWED]);
+    expect(manager.snapshots().map((browser) => browser.device.preset)).toEqual([
+      'tablet',
+      'tablet',
+      'tablet',
+    ]);
+  });
+
+  it('Stop wins asynchronous profile creation without deleting saved jobs or preferences', async () => {
+    const data = state(1);
+    data.jobs = [{ ...historicalJob('legacy', 1, FIRST), status: 'pending' }];
+    data.scheduleTemplates = [{ browserId: 1, url: FIRST }];
+    const { controller, manager, urls } = await setup(data);
+    const creation = deferred();
+    const create = manager.create.getMockImplementation()!;
+    manager.create.mockImplementationOnce(async (count) => {
+      await creation.promise;
+      await create(count);
+    });
+    const preparing = prepare(controller, REVIEWED, 3);
+    const rejected = expect(preparing).rejects.toThrow(/cancelled/);
+    await controller.command({ type: 'global', action: 'stop' });
+    creation.resolve();
+    await rejected;
+    expect(controller.snapshot().preparedRun).toBeNull();
+    expect(controller.snapshot().jobs.map((job) => job.id)).toEqual(['legacy']);
+    expect(controller.snapshot().settings.schedule.enabled).toBe(true);
+    expect(data.scheduleTemplates).toEqual([{ browserId: 1, url: FIRST }]);
+    expect(urls()).toEqual([]);
+  });
+
+  it('Stop cancels an in-flight device application before any host authority or navigation is granted', async () => {
+    const { controller, manager, options, urls } = await setup(state(2));
+    const plan = await prepare(controller, REVIEWED, 1, 'mobile');
+    const device = deferred();
+    manager.applyDevice.mockImplementationOnce(async (_ids, _device, signal) => {
+      await device.promise;
+      signal?.throwIfAborted();
+    });
+    const starting = start(controller, plan.id);
+    const rejected = expect(starting).rejects.toThrow(/stopped/);
+    expect(options.settings(1).authorizedDomains).toEqual([]);
+    await controller.command({ type: 'global', action: 'stop' });
+    expect(options.settings(1).authorizedDomains).toEqual([]);
+    device.resolve();
+    await rejected;
+    expect(urls()).toEqual([]);
+    expect(controller.snapshot().settings.browserCount).toBe(2);
+    expect(controller.snapshot().jobs.every((job) => job.status === 'cancelled')).toBe(true);
+    const again = await prepare(controller, REVIEWED, 1, 'tablet');
+    await start(controller, again.id);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(urls()).toEqual([REVIEWED]);
+    expect(controller.snapshot().preparedRun?.status).toBe('finished');
+  });
+
+  it('records Pause during device setup without pausing the native operation, then resumes through Start', async () => {
+    const { controller, manager, urls } = await setup(state(1));
+    const plan = await prepare(controller, REVIEWED);
+    const device = deferred();
+    manager.applyDevice.mockImplementationOnce(async () => {
+      await device.promise;
+    });
+    const starting = start(controller, plan.id);
+    await controller.command({ type: 'global', action: 'pause' });
+    expect(manager.pause).not.toHaveBeenCalled();
+    device.resolve();
+    await starting;
+    expect(controller.snapshot().scheduler).toMatchObject({ running: true, paused: true });
+    expect(urls()).toEqual([]);
+    await start(controller, plan.id);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(urls()).toEqual([REVIEWED]);
+    expect(controller.snapshot().preparedRun?.status).toBe('finished');
+  });
+
+  it('keeps idle, ready and finished workspaces editable after Pause and clears pause when a batch finishes', async () => {
+    const { controller, manager, urls } = await setup(state(2));
+    await controller.command({ type: 'global', action: 'pause' });
+    expect(controller.snapshot().scheduler).toMatchObject({ running: false, paused: false });
+    expect(manager.pause).not.toHaveBeenCalled();
+
+    const plan = await prepare(controller, FIRST);
+    await controller.command({ type: 'global', action: 'pause' });
+    expect(controller.snapshot().preparedRun?.status).toBe('ready');
+    expect(controller.snapshot().scheduler.paused).toBe(false);
+    expect(manager.pause).not.toHaveBeenCalled();
+
+    const held = manager.hold(FIRST);
+    await start(controller, plan.id);
+    await controller.command({ type: 'global', action: 'pause' });
+    expect(controller.snapshot().scheduler.paused).toBe(true);
+    expect(manager.pause).toHaveBeenCalledExactlyOnceWith(1);
+    held.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.snapshot().preparedRun?.status).toBe('finished');
+    expect(controller.snapshot().scheduler).toMatchObject({ running: false, paused: false });
+
+    await controller.command({ type: 'global', action: 'pause' });
+    expect(controller.snapshot().scheduler.paused).toBe(false);
+    expect(manager.pause).toHaveBeenCalledTimes(1);
+    const next = await prepare(controller, SECOND, 2, 'mobile');
+    expect(next.status).toBe('ready');
+    expect(urls()).toEqual([FIRST]);
+  });
+
+  it('resumes only the already-reviewed remainder through Start after a global pause', async () => {
+    const data = state(1);
+    data.jobs = [{ ...historicalJob('legacy', 1, OTHER), status: 'pending' }];
+    const { controller, manager, urls } = await setup(data);
+    const held = manager.hold(FIRST);
+    const plan = await prepare(controller, `${FIRST}\n${SECOND}`, 1);
+    await start(controller, plan.id);
+    await controller.command({ type: 'global', action: 'pause' });
+    held.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(urls()).toEqual([FIRST]);
+    await start(controller, plan.id);
+    await vi.advanceTimersByTimeAsync(INTERVAL * 2);
+    expect(urls()).toEqual([FIRST, SECOND]);
+    expect(controller.snapshot().preservedJobs.find((job) => job.id === 'legacy')?.status).toBe('pending');
+  });
+
+  it('continues proxy-wait work only after an eligible endpoint appears and never accepts unrelated jobs', async () => {
+    const data = state(1);
+    data.jobs = [{ ...historicalJob('legacy', 1, SECOND), status: 'pending' }];
+    const { controller, manager, urls } = await setup(data);
+    manager.waiting.add(FIRST);
+    const plan = await prepare(controller, FIRST);
+    await start(controller, plan.id);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(urls()).toEqual([FIRST]);
+    expect(controller.snapshot().preparedRun?.status).toBe('running');
+    manager.waiting.delete(FIRST);
+    controller.pool.merge([
+      {
+        id: 'fixture',
+        ip: '127.0.0.1',
+        port: 9001,
+        protocol: 'http',
+        country: 'US',
+        countryName: 'United States',
+        status: 'available',
+        failures: 0,
+        source: 'fixture',
+      },
+    ]);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(urls()).toEqual([FIRST, FIRST]);
+    expect(controller.snapshot().preparedRun?.status).toBe('finished');
+    expect(controller.snapshot().preservedJobs.find((job) => job.id === 'legacy')?.status).toBe('pending');
+  });
+
+  it('cancels only a failed review profile remainder, preserves saved work, and permits a fresh reviewed run', async () => {
+    const data = state(1);
+    data.jobs = [{ ...historicalJob('legacy', 1, SECOND), status: 'pending' }];
+    data.scheduleTemplates = [{ browserId: 1, url: SECOND }];
+    const { controller, manager, urls } = await setup(data);
+    manager.failures.set(FIRST, new Error('HTTP 403: access requires manual review'));
+    const plan = await prepare(controller, `${FIRST}\n${SECOND}`, 1);
+    await start(controller, plan.id);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.snapshot().preparedRun?.status).toBe('finished');
+    expect(
+      controller
+        .snapshot()
+        .jobs.filter((job) => plan.jobIds.includes(job.id))
+        .map((job) => job.status),
+    ).toEqual(['failed', 'cancelled']);
+    expect(controller.snapshot().preservedJobs.find((job) => job.id === 'legacy')?.status).toBe('pending');
+    expect(data.scheduleTemplates).toEqual([{ browserId: 1, url: SECOND }]);
+    expect(data.settings.schedule.enabled).toBe(true);
+    manager.failures.clear();
+    const again = await prepare(controller, REVIEWED);
+    await start(controller, again.id);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(urls()).toEqual([FIRST, REVIEWED]);
+    expect(controller.snapshot().preparedRun?.status).toBe('finished');
+  });
+
+  it('finishes a restricted batch when a stopped sibling has already fulfilled its native QA promise', async () => {
+    const { controller, manager, urls } = await setup(state(2));
+    manager.failures.set(FIRST, new SiteRestrictionError('HTTP 403', FIRST));
+    const plan = await prepare(
+      controller,
+      `${FIRST}\n${SECOND}\nhttps://other.test/later-one\nhttps://other.test/later-two`,
+      2,
+    );
+    await start(controller, plan.id);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(urls()).toEqual([FIRST, SECOND]);
+    expect(controller.snapshot().jobs.some((job) => ['pending', 'running'].includes(job.status))).toBe(false);
+    expect(controller.snapshot().preparedRun?.status).toBe('finished');
+    expect(controller.snapshot().scheduler.running).toBe(false);
+  });
+
+  it('simple Stop revokes only the reviewed batch while preserving saved queues and recurrence preferences', async () => {
+    const data = state(1);
+    data.jobs = [{ ...historicalJob('legacy', 1, OTHER), status: 'pending' }];
+    data.scheduleTemplates = [{ browserId: 1, url: OTHER }];
+    const { controller, manager, options, saved } = await setup(data);
+    manager.hold(FIRST);
+    const plan = await prepare(controller, `${FIRST}\n${SECOND}`);
+    await start(controller, plan.id);
+    await controller.command({ type: 'global', action: 'stop' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(controller.snapshot().preservedJobs.find((job) => job.id === 'legacy')?.status).toBe('pending');
+    expect(
+      controller
+        .snapshot()
+        .jobs.filter((job) => plan.jobIds.includes(job.id))
+        .every((job) => job.status === 'cancelled'),
+    ).toBe(true);
+    expect(saved().settings.schedule.enabled).toBe(true);
+    expect(saved().scheduleTemplates).toEqual([{ browserId: 1, url: OTHER }]);
+    expect(controller.snapshot().scheduler.running).toBe(false);
+    expect(options.settings(1).authorizedDomains).toEqual(data.settings.authorizedDomains);
+    await expect(start(controller, plan.id)).rejects.toThrow(/Distribute/);
+  });
 });
 
 describe('explicit queue runs and recurrence', () => {

@@ -1,6 +1,6 @@
 # Historical Windows verification record — 1.0.0-rc.1
 
-This record preserves the original rc.1 candidate and its then-current proxy-validation behavior. Version rc.2 removes preflight validation, adds Austria and simplifies the interface. Use the matching release workflow for current tests, measurements and package hashes; do not apply these old validation claims to rc.2.
+This record preserves the original rc.1 candidate and its then-current proxy-validation behavior. Version rc.2 removes preflight validation and adds Austria. Version rc.3 reduces the interface to browser count, device type and links, followed by Distribute and Start. Use the matching release workflow for current tests, measurements and package hashes; these historical results do not verify later releases.
 
 ## Source, results and provenance
 
