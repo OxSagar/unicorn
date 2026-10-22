@@ -28,7 +28,6 @@ describe('privileged IPC input validation', () => {
     { excludedLinkPatterns: Array.from({ length: 51 }, () => '*logout*') },
     { minimizeToTray: 'true' },
     { retryLimit: 6 },
-    { proxyTimeoutMs: 1 },
     { proxyRefreshMinutes: 0 },
     { resourceLimitMb: 0 },
     { logRetentionDays: -1 },
@@ -56,7 +55,6 @@ describe('privileged IPC input validation', () => {
     'snapshot',
     'clear-queue',
     'refresh-proxies',
-    'validate-proxies',
     'export-logs',
     'export-results',
     'import-urls',
@@ -65,6 +63,14 @@ describe('privileged IPC input validation', () => {
     expect(validateCommand({ type })).toEqual({ type });
     expect(() => validateCommand({ type, path: '/etc/passwd' })).toThrow();
   });
+  it('rejects the removed proxy-validation command', () => {
+    expect(() => validateCommand({ type: 'validate-proxies' })).toThrow('Unknown command');
+  });
+  it.each([{ proxyTimeoutMs: 12000 }, { uniqueExitIps: true }])(
+    'rejects retired validation settings at the IPC boundary',
+    (legacy) =>
+      expect(() => validateSettings({ ...DEFAULT_SETTINGS, ...legacy })).toThrow('Unexpected field'),
+  );
   it.each([
     'back',
     'forward',

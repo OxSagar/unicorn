@@ -13,7 +13,7 @@ export function proxyRule(proxy: ProxyRecord): string {
 export interface GateHooks {
   approveRequest?(url: string): void;
   approveNavigation(url: string, mainFrame: boolean): void;
-  onFailure(message: string, mainFrame: boolean): void;
+  onFailure(message: string, mainFrame: boolean, webContentsId?: number): void;
   onRestricted(status: number, url: string): void;
   onPolicyRestricted?(error: SiteRestrictionError): void;
 }
@@ -34,6 +34,7 @@ export class SessionGate {
   private readonly state: GateSessionState;
   private headersEnabled = false;
   private enabledGeneration?: number;
+  private readonly mainFrameGenerations = new Map<number, number>();
 
   constructor(
     readonly session: Session,
@@ -64,6 +65,8 @@ export class SessionGate {
         ) {
           this.hooks.approveNavigation(scopeUrl, details.resourceType === 'mainFrame');
         }
+        if (details.resourceType === 'mainFrame')
+          this.mainFrameGenerations.set(details.id, this.state.generation);
         callback({});
       } catch (error) {
         if (error instanceof SiteRestrictionError) {
@@ -74,6 +77,7 @@ export class SessionGate {
         this.hooks.onFailure(
           error instanceof Error ? error.message : String(error),
           details.resourceType === 'mainFrame',
+          details.webContentsId,
         );
         callback({ cancel: true });
       }
@@ -91,9 +95,17 @@ export class SessionGate {
       callback({});
     });
     session.webRequest.onErrorOccurred((details) => {
+      const mainFrame = details.resourceType === 'mainFrame';
+      const generation = this.mainFrameGenerations.get(details.id);
+      this.mainFrameGenerations.delete(details.id);
+      // A late error from an old route must not retire a newer endpoint lease.
+      if (mainFrame && generation !== this.enabledGeneration) return;
       if (this.isEnabled && !['net::ERR_ABORTED', 'net::ERR_BLOCKED_BY_CLIENT'].includes(details.error)) {
-        this.hooks.onFailure(details.error, details.resourceType === 'mainFrame');
+        this.hooks.onFailure(details.error, mainFrame, details.webContentsId);
       }
+    });
+    session.webRequest.onCompleted((details) => {
+      this.mainFrameGenerations.delete(details.id);
     });
   }
 
@@ -145,6 +157,7 @@ export class SessionGate {
     this.state.generation++;
     this.enabled = false;
     this.headersEnabled = false;
+    this.mainFrameGenerations.clear();
     await this.serial(async () => {
       let failure = this.state.poisoned;
       if (!failure) {
@@ -175,6 +188,7 @@ export class SessionGate {
     const generation = ++this.state.generation;
     this.enabled = false;
     this.headersEnabled = false;
+    this.mainFrameGenerations.clear();
     await this.serial(async () => {
       this.assertUsable();
       signal.throwIfAborted();
@@ -210,6 +224,7 @@ export class SessionGate {
   dispose(): void {
     this.state.generation++;
     this.enabled = false;
+    this.mainFrameGenerations.clear();
     // Keep the deny request handler for persisted service workers after a view closes.
     this.session.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (_details, callback) =>
       callback({ cancel: true }),
@@ -217,5 +232,6 @@ export class SessionGate {
     this.session.webRequest.onBeforeSendHeaders(null);
     this.session.webRequest.onHeadersReceived(null);
     this.session.webRequest.onErrorOccurred(null);
+    this.session.webRequest.onCompleted(null);
   }
 }

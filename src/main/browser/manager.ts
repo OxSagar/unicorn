@@ -170,12 +170,13 @@ export class BrowserManager {
         assertApproved(url, this.options.settings());
         if (mainFrame) this.options.navigationAllowed?.(url);
       },
-      onFailure: (message, mainFrame) => {
+      onFailure: (message, mainFrame, webContentsId) => {
         const entry = holder.entry;
         if (!entry || entry.closing) return;
         entry.snapshot.networkErrors++;
         if (mainFrame) entry.snapshot.lastError = message;
         this.log(entry, 'warn', 'network', message);
+        if (mainFrame) this.failIdleNavigation(entry, message, webContentsId);
         this.changed();
       },
       onRestricted: (status, url) => {
@@ -268,7 +269,7 @@ export class BrowserManager {
       entry,
       'info',
       'browser',
-      'Persistent isolated browser created; network locked until proxy validation',
+      'Persistent isolated browser created; network locked until proxy assignment',
     );
   }
 
@@ -648,13 +649,13 @@ export class BrowserManager {
     signal.throwIfAborted();
     if (entry.gate.isEnabled && entry.snapshot.proxy) return;
     this.move(entry, 'WAITING_FOR_PROXY');
-    entry.snapshot.stage = 'Waiting for a verified proxy';
-    this.move(entry, 'VALIDATING_PROXY');
+    entry.snapshot.stage = 'Assigning an eligible proxy endpoint';
+    this.move(entry, 'ASSIGNING_PROXY');
     const proxy = await this.options.proxies.acquire(entry.snapshot.id, signal);
     signal.throwIfAborted();
     if (!proxy) {
       this.move(entry, 'WAITING_FOR_PROXY');
-      throw new Error('No validated, eligible, unassigned proxy is currently available');
+      throw new Error('No eligible, unassigned proxy endpoint is currently available');
     }
     await control?.checkpoint();
     entry.snapshot.proxy = proxy;
@@ -674,7 +675,7 @@ export class BrowserManager {
       entry,
       'info',
       'proxy',
-      `Verified ${proxy.country} ${proxy.protocol.toUpperCase()} proxy assigned`,
+      `${proxy.country} ${proxy.protocol.toUpperCase()} endpoint assigned using provider country metadata`,
     );
   }
 
@@ -754,6 +755,40 @@ export class BrowserManager {
     entry.abort?.abort(error);
     if (canTransition(entry.snapshot.state, 'ERROR')) this.move(entry, 'ERROR');
     this.changed();
+  }
+
+  private failIdleNavigation(entry: Entry, message: string, webContentsId?: number): void {
+    if (
+      entry.closing ||
+      this.shuttingDown ||
+      entry.synthetic ||
+      entry.active ||
+      entry.abort ||
+      entry.pauseRequested ||
+      entry.restricted ||
+      !entry.snapshot.proxy ||
+      !entry.gate.isEnabled ||
+      !['RUNNING', 'READY'].includes(entry.snapshot.state) ||
+      entry.view.webContents.isDestroyed() ||
+      webContentsId !== entry.view.webContents.id ||
+      !isRetryableTransportError(message)
+    )
+      return;
+    this.cancelHealth(entry);
+    entry.snapshot.stage = 'Navigation failed';
+    this.move(entry, 'ERROR');
+    // block() closes the request gate synchronously. Publishing cleanup as the
+    // active operation makes a subsequent Navigate/Stop wait before reusing a lease.
+    const cleanup = this.lockNetwork(entry, message);
+    entry.active = cleanup;
+    void cleanup
+      .catch((error: unknown) =>
+        this.log(entry, 'error', 'network', `Idle navigation cleanup failed: ${String(error)}`),
+      )
+      .finally(() => {
+        if (entry.active === cleanup) entry.active = undefined;
+        this.changed();
+      });
   }
 
   private operation(
@@ -868,6 +903,15 @@ export class BrowserManager {
       } catch (error) {
         const failure = entry.restricted ?? error;
         entry.snapshot.lastError = failure instanceof Error ? failure.message : String(failure);
+        // Endpoint health is learned from the actual page request. A terminal
+        // transport failure must enter cooldown even when no retry is permitted.
+        const proxyFailure =
+          !abort.signal.aborted &&
+          !entry.restricted &&
+          entry.snapshot.state === 'NAVIGATING' &&
+          isRetryableTransportError(failure)
+            ? entry.snapshot.lastError
+            : undefined;
         if (
           entry.snapshot.state !== 'WAITING_FOR_PROXY' &&
           !entry.closing &&
@@ -882,7 +926,7 @@ export class BrowserManager {
               ? 'STOPPED'
               : 'ERROR',
           );
-        await this.lockNetwork(entry).catch((cleanupError: unknown) => {
+        await this.lockNetwork(entry, proxyFailure).catch((cleanupError: unknown) => {
           this.log(entry, 'error', 'network', `Network cleanup also failed: ${String(cleanupError)}`);
         });
         throw failure;

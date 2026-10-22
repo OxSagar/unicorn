@@ -52,8 +52,6 @@ function reserveRecords(statuses: ProxyRecord['status'][]): ProxyRecord[] {
     country: 'US',
     countryName: 'United States',
     status,
-    lastChecked: status === 'available' ? Date.now() : null,
-    latencyMs: status === 'available' ? 10 : null,
     failures: status === 'failed' ? 1 : 0,
     source: 'proxyscrape',
     ...(status === 'assigned' ? { assignedTo: index + 1 } : {}),
@@ -88,9 +86,7 @@ async function setup(options: { browserCount?: number; testMode?: boolean } = {}
     data,
     store,
     logs,
-    options.testMode
-      ? { userData: directory, proxies: [], diagnosticUrl: 'https://fixture.invalid/diagnostic' }
-      : undefined,
+    options.testMode ? { userData: directory, proxies: [] } : undefined,
   );
   controllers.add(controller);
   const cachePath = path.join(directory, 'proxy-cache.json');
@@ -131,6 +127,42 @@ afterEach(async () => {
 });
 
 describe('ProxyScrape control-plane refresh', () => {
+  it('directly assigns parsed API countries without a diagnostic request or health fields', async () => {
+    const { controller, proxyCallbacks } = await setup();
+    network.mockResolvedValueOnce(
+      jsonResponse({
+        proxies: [
+          { ...record('8.8.8.1'), alive: false, ip_data: { countryCode: 'AT' } },
+          record('8.8.8.2'),
+          record('8.8.8.3'),
+          record('8.8.8.4'),
+        ],
+      }),
+    );
+    await controller.refreshProxies();
+    network.mockClear();
+    const leases = await Promise.all([proxyCallbacks.acquire(1), proxyCallbacks.acquire(2)]);
+    expect(leases[0]).toMatchObject({
+      country: 'AT',
+      countryName: 'Austria',
+      status: 'assigned',
+      assignedTo: 1,
+    });
+    expect(leases[1]).toMatchObject({ country: 'US', status: 'assigned', assignedTo: 2 });
+    expect(new Set(leases.map((lease) => lease?.id)).size).toBe(2);
+    for (const lease of leases)
+      for (const key of ['exitIp', 'lastChecked', 'latencyMs']) expect(lease).not.toHaveProperty(key);
+    expect(network).not.toHaveBeenCalled();
+  });
+
+  it('does not start a provider request for an already-cancelled allocation', async () => {
+    const { controller, proxyCallbacks } = await setup();
+    const signal = AbortSignal.abort(new Error('Stopped before allocation'));
+    await expect(proxyCallbacks.acquire(1, signal)).rejects.toThrow('Stopped before allocation');
+    expect(network).not.toHaveBeenCalled();
+    expect(controller.pool.assigned(1)).toBeUndefined();
+  });
+
   it('uses the fixed HTTPS provider, rejects redirects, filters records, and persists the successful response', async () => {
     const { controller, cache } = await setup();
     const raw = {
@@ -140,6 +172,7 @@ describe('ProxyScrape control-plane refresh', () => {
         { ...record('9.9.9.9'), alive: false },
         { ...record('127.0.0.1'), ip_data: { countryCode: 'US' } },
         { ...record('8.8.4.4'), protocol: 'socks5', ip_data: { countryCode: 'JP' } },
+        { ...record('8.8.4.5'), ip_data: { countryCode: 'AT' } },
       ],
       nextpage: false,
     };
@@ -154,17 +187,20 @@ describe('ProxyScrape control-plane refresh', () => {
     expect(requested.searchParams.get('format')).toBe('json');
     expect(requested.searchParams.get('protocol')).toBe('http,socks5');
     expect(requested.searchParams.get('limit')).toBe('2000');
+    expect(requested.searchParams.get('country')).toBe('US,GB,CA,FR,DE,JP,IT,AT');
     expect(options?.redirect).toBe('error');
     expect(options?.signal).toBeInstanceOf(AbortSignal);
     expect(controller.snapshot().provider).toMatchObject({
       lastFetchedAt: initialTime.getTime(),
-      retrieved: 5,
-      eligible: 2,
+      retrieved: 6,
+      eligible: 4,
       fetching: false,
     });
     expect(controller.pool.list().map(({ ip, status }) => ({ ip, status }))).toEqual([
-      { ip: '8.8.8.8', status: 'unverified' },
-      { ip: '8.8.4.4', status: 'unverified' },
+      { ip: '8.8.8.8', status: 'available' },
+      { ip: '9.9.9.9', status: 'available' },
+      { ip: '8.8.4.4', status: 'available' },
+      { ip: '8.8.4.5', status: 'available' },
     ]);
     expect(JSON.parse(await cache())).toEqual({ at: initialTime.getTime(), data: raw });
   });
@@ -466,11 +502,11 @@ describe('automatic proxy reserve replenishment', () => {
   );
 
   it.each([
-    { browserCount: 1, statuses: ['available', 'unverified', 'available'], refresh: true },
-    { browserCount: 1, statuses: ['available', 'unverified', 'available', 'unverified'], refresh: false },
-    { browserCount: 8, statuses: Array.from({ length: 7 }, () => 'unverified'), refresh: true },
+    { browserCount: 1, statuses: ['available', 'available', 'available'], refresh: true },
+    { browserCount: 1, statuses: ['available', 'available', 'available', 'available'], refresh: false },
+    { browserCount: 8, statuses: Array.from({ length: 7 }, () => 'available'), refresh: true },
     { browserCount: 8, statuses: Array.from({ length: 8 }, () => 'available'), refresh: false },
-    { browserCount: 1, statuses: ['available', 'failed', 'assigned', 'validating'], refresh: true },
+    { browserCount: 1, statuses: ['available', 'failed', 'assigned', 'assigned'], refresh: true },
   ] satisfies Array<{ browserCount: number; statuses: ProxyRecord['status'][]; refresh: boolean }>)(
     'replenishes $statuses for $browserCount browsers only below the usable-reserve threshold',
     async ({ browserCount, statuses, refresh }) => {

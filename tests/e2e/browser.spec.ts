@@ -221,7 +221,8 @@ test('HTTPS is certificate verified through CONNECT and WebSockets execute in Ch
   );
   expect(ws).toBe('unicorn-websocket-ok');
   expect(fixtures.proxies[0]!.tunnels).toBeGreaterThan(0);
-  expect((await snapshot(harness)).browsers[0]?.proxy?.exitIp).toBe('8.8.0.1');
+  expect((await snapshot(harness)).browsers[0]?.proxy?.id).toBe(fixtures.proxies[0]!.record.id);
+  expect(fixtures.requests.filter((request) => request.path === '/diagnostic')).toEqual([]);
 });
 
 for (const count of [1, 5, 10, 15, 20])
@@ -250,7 +251,10 @@ for (const count of [1, 5, 10, 15, 20])
     expect(state.browsers).toHaveLength(count);
     expect(state.browsers.every((browser) => browser.state === 'RUNNING' && browser.proxy)).toBe(true);
     expect(new Set(state.browsers.map((browser) => browser.proxy!.id)).size).toBe(count);
-    expect(new Set(state.browsers.map((browser) => browser.proxy!.exitIp)).size).toBe(count);
+    expect(new Set(state.browsers.map((browser) => `${browser.proxy!.ip}:${browser.proxy!.port}`)).size).toBe(
+      count,
+    );
+    expect(fixtures.requests.filter((request) => request.path === '/diagnostic')).toEqual([]);
     expect(fixtures.directRequests()).toBe(before);
     for (const browser of state.browsers)
       expect(await browserEvaluate(harness, browser.id, 'window.fixtureReady')).toBe(true);

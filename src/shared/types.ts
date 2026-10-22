@@ -1,10 +1,10 @@
-export const COUNTRIES = ['US', 'GB', 'CA', 'FR', 'DE', 'JP', 'IT'] as const;
+export const COUNTRIES = ['US', 'GB', 'CA', 'FR', 'DE', 'JP', 'IT', 'AT'] as const;
 export type CountryCode = (typeof COUNTRIES)[number];
 export type ProxyProtocol = 'http' | 'https' | 'socks5';
 export type BrowserState =
   | 'CREATED'
   | 'WAITING_FOR_PROXY'
-  | 'VALIDATING_PROXY'
+  | 'ASSIGNING_PROXY'
   | 'READY'
   | 'NAVIGATING'
   | 'RUNNING'
@@ -31,13 +31,10 @@ export interface ProxyRecord {
   protocol: ProxyProtocol;
   country: CountryCode;
   countryName: string;
-  status: 'unverified' | 'validating' | 'available' | 'assigned' | 'failed';
-  lastChecked: number | null;
-  latencyMs: number | null;
+  status: 'available' | 'assigned' | 'failed';
   failures: number;
   error?: string;
   assignedTo?: number;
-  exitIp?: string;
   source: 'proxyscrape' | 'fixture';
 }
 export interface BrowserSnapshot {
@@ -88,9 +85,7 @@ export interface AppSettings {
   dailyRequestLimit: number;
   excludedLinkPatterns: string[];
   retryLimit: number;
-  proxyTimeoutMs: number;
   proxyRefreshMinutes: number;
-  uniqueExitIps: boolean;
   allowLocalhost: boolean;
   closePopupsAfterRun: boolean;
   theme: 'dark' | 'light';
@@ -188,7 +183,6 @@ export type AppCommand =
   | { type: 'clear-queue' }
   | { type: 'settings'; settings: AppSettings }
   | { type: 'refresh-proxies' }
-  | { type: 'validate-proxies' }
   | {
       type: 'profile';
       id: number;

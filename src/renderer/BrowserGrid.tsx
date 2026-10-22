@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { DEVICES } from '../shared/defaults';
 import type { AppSnapshot, BrowserSnapshot, ViewBounds } from '../shared/types';
 import { Badge, Button, duration, EmptyState, formatBytes, Icon, IconButton, Status } from './components';
 import type { Actions } from './ui-types';
@@ -8,18 +9,10 @@ interface Props extends Actions {
   selected: number[];
   setSelected: (ids: number[]) => void;
   blocked: boolean;
-  compact: boolean;
+  busy: boolean;
 }
-export default function BrowserGrid({
-  snapshot,
-  selected,
-  setSelected,
-  blocked,
-  compact,
-  ...actions
-}: Props) {
+export default function BrowserGrid({ snapshot, selected, setSelected, blocked, busy, ...actions }: Props) {
   const [expanded, setExpanded] = useState<number | null>(null);
-  const [columns, setColumns] = useState('auto');
   const [focusedId, setFocusedId] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const anchors = useRef(new Map<number, HTMLDivElement>());
@@ -74,7 +67,7 @@ export default function BrowserGrid({
       observer.disconnect();
       window.removeEventListener('resize', scheduleLayout);
     };
-  }, [scheduleLayout, snapshot.browsers.length, expanded, columns, focusedId, compact]);
+  }, [scheduleLayout, snapshot.browsers.length, expanded, focusedId]);
   useEffect(() => {
     emitLayout();
   }, [blocked, expanded, snapshot, emitLayout]);
@@ -103,18 +96,42 @@ export default function BrowserGrid({
   const allSelected = snapshot.browsers.length > 0 && snapshot.browsers.every((b) => selected.includes(b.id));
   return (
     <section className="browser-workspace">
-      <div className="workspace-toolbar">
+      <div className="workspace-toolbar simple-browser-toolbar">
         <div className="toolbar-leading">
-          <h2>{expanded !== null ? `Browser ${String(expanded).padStart(2, '0')}` : 'Browser workspace'}</h2>
-          <Badge>{snapshot.browsers.length} profiles</Badge>
           <label className="select-all">
             <input
               type="checkbox"
+              aria-label="Select all browsers"
               checked={allSelected}
-              onChange={() => setSelected(allSelected ? [] : snapshot.browsers.map((b) => b.id))}
+              onChange={() => setSelected(allSelected ? [] : snapshot.browsers.map((browser) => browser.id))}
             />
             Select all
           </label>
+          <span className="selection-count">{selected.length} selected</span>
+          <div className="preset-switcher" role="group" aria-label="Device for selected browsers">
+            {(['desktop', 'mobile', 'tablet'] as const).map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                disabled={busy || !selected.length}
+                aria-pressed={
+                  selected.length > 0 &&
+                  snapshot.browsers
+                    .filter((browser) => selected.includes(browser.id))
+                    .every((browser) => browser.device.preset === preset)
+                }
+                title={`Apply ${preset} to selected browsers`}
+                onClick={() =>
+                  void actions.run(
+                    { type: 'device', ids: selected, device: DEVICES[preset] },
+                    `${preset[0].toUpperCase() + preset.slice(1)} applied to selected browsers.`,
+                  )
+                }
+              >
+                {preset[0].toUpperCase() + preset.slice(1)}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="toolbar-actions">
           {expanded !== null && (
@@ -122,22 +139,8 @@ export default function BrowserGrid({
               All browsers
             </Button>
           )}
-          <label className="layout-picker">
-            <Icon name="grid" size={15} />
-            <select
-              aria-label="Browser grid layout"
-              value={columns}
-              onChange={(e) => setColumns(e.target.value)}
-            >
-              <option value="auto">Auto layout</option>
-              <option value="1">1 column</option>
-              <option value="2">2 columns</option>
-              <option value="3">3 columns</option>
-              <option value="4">4 columns</option>
-            </select>
-          </label>
-          <Button icon="link" variant="ghost" onClick={() => actions.setPage('links')}>
-            Distribute links
+          <Button icon="link" onClick={() => actions.setPage('links')}>
+            Add links
           </Button>
         </div>
       </div>
@@ -160,14 +163,7 @@ export default function BrowserGrid({
               storage.
             </EmptyState>
           ) : (
-            <div
-              className={`browser-grid ${expanded !== null ? 'expanded' : ''}`}
-              style={
-                columns === 'auto' || expanded !== null
-                  ? undefined
-                  : { gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }
-              }
-            >
+            <div className={`browser-grid ${expanded !== null ? 'expanded' : ''}`}>
               {visible.map((browser) => (
                 <BrowserCard
                   key={browser.id}
@@ -236,7 +232,12 @@ function BrowserCard({
     >
       <div className="browser-card-heading">
         <label className="browser-label">
-          <input type="checkbox" checked={selected} onChange={onSelect} />
+          <input
+            type="checkbox"
+            aria-label={`Select browser ${browser.id}`}
+            checked={selected}
+            onChange={onSelect}
+          />
           <span className="browser-number">{String(browser.id).padStart(2, '0')}</span>
           <strong title={browser.name}>{browser.name}</strong>
         </label>
@@ -294,18 +295,18 @@ function BrowserCard({
               <i />
             </div>
             <strong>
-              {['WAITING_FOR_PROXY', 'VALIDATING_PROXY'].includes(browser.state)
-                ? 'Preparing secure connection'
-                : 'Ready for your next test'}
+              {['WAITING_FOR_PROXY', 'ASSIGNING_PROXY'].includes(browser.state)
+                ? 'Assigning a proxy'
+                : 'Ready to browse'}
             </strong>
             <span>
-              {['WAITING_FOR_PROXY', 'VALIDATING_PROXY'].includes(browser.state)
-                ? 'Waiting for a verified, eligible proxy.'
-                : 'Add an authorized URL to begin browsing.'}
+              {['WAITING_FOR_PROXY', 'ASSIGNING_PROXY'].includes(browser.state)
+                ? 'Waiting for an eligible API-listed endpoint.'
+                : 'Enter an approved URL above or add links to the queue.'}
             </span>
             <span className="placeholder-caption">
               <Icon name="shield" size={12} />
-              Isolated profile · Proxy required
+              Separate profile · Proxy required
             </span>
           </div>
         )}
@@ -410,14 +411,12 @@ function BrowserInspector({
         <dd>
           {browser.device.scaleFactor}× / {browser.device.touch ? 'Enabled' : 'Disabled'}
         </dd>
-        <dt>Proxy</dt>
+        <dt>Proxy · API country</dt>
         <dd>
           {browser.proxy
             ? `${browser.proxy.country} · ${browser.proxy.ip}:${browser.proxy.port}`
             : 'Not assigned'}
         </dd>
-        <dt>Verified exit IP</dt>
-        <dd>{browser.proxy?.exitIp || 'Not verified'}</dd>
         <dt>JavaScript</dt>
         <dd>Enabled · {browser.jsErrors} errors</dd>
         <dt>Current stage</dt>
@@ -427,27 +426,32 @@ function BrowserInspector({
         <dt>Elapsed</dt>
         <dd>{duration(browser.elapsedMs)}</dd>
       </dl>
-      <Button
-        icon="terminal"
-        onClick={() =>
-          void actions.run({ type: 'diagnostic', id: browser.id }).then((result) => {
-            if (result?.diagnostic)
-              actions.inspect(
-                `Browser ${browser.id} diagnostics`,
-                <pre className="diagnostic-json">{JSON.stringify(result.diagnostic, null, 2)}</pre>,
-              );
-          })
-        }
-      >
-        Check device behavior
-      </Button>
-      <Button
-        icon="terminal"
-        variant="ghost"
-        onClick={() => void actions.run({ type: 'browser', id: browser.id, action: 'devtools' })}
-      >
-        Open developer tools
-      </Button>
+      <details className="inspector-details">
+        <summary>Troubleshooting</summary>
+        <div>
+          <Button
+            icon="terminal"
+            onClick={() =>
+              void actions.run({ type: 'diagnostic', id: browser.id }).then((result) => {
+                if (result?.diagnostic)
+                  actions.inspect(
+                    `Browser ${browser.id} diagnostics`,
+                    <pre className="diagnostic-json">{JSON.stringify(result.diagnostic, null, 2)}</pre>,
+                  );
+              })
+            }
+          >
+            Check device behavior
+          </Button>
+          <Button
+            icon="terminal"
+            variant="ghost"
+            onClick={() => void actions.run({ type: 'browser', id: browser.id, action: 'devtools' })}
+          >
+            Open developer tools
+          </Button>
+        </div>
+      </details>
       {browser.popups.length > 0 && (
         <section className="inspector-section">
           <h4>
@@ -474,8 +478,8 @@ function BrowserInspector({
           ))}
         </section>
       )}
-      <section className="inspector-section">
-        <h4>Profile controls</h4>
+      <details className="inspector-details">
+        <summary>Profile data</summary>
         <div className="profile-controls">
           {(['cache', 'cookies', 'permissions', 'history'] as const).map((action) => (
             <Button key={action} variant="ghost" onClick={() => profileAction(action)}>
@@ -489,9 +493,9 @@ function BrowserInspector({
             Reset complete profile
           </Button>
         </div>
-      </section>
-      <section className="inspector-section">
-        <h4>Recent history</h4>
+      </details>
+      <details className="inspector-details">
+        <summary>Recent history</summary>
         {browser.history.length ? (
           browser.history
             .slice(-8)
@@ -505,7 +509,7 @@ function BrowserInspector({
         ) : (
           <p className="muted">No saved navigation yet.</p>
         )}
-      </section>
+      </details>
       <Button
         variant="danger"
         onClick={() =>

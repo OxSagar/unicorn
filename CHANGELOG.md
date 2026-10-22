@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0-rc.2 — 2026-10-22
+
+- Assign eligible ProxyScrape endpoints directly from the API without preflight diagnostics, exit-IP verification, or measured-latency checks.
+- Add Austria (`AT`) alongside US, GB, CA, FR, DE, JP and IT.
+- Keep unique endpoint allocation, fixed-proxy browser routing, blocked direct fallback, and bounded handling of actual connection failures.
+- Simplify navigation to Browsers, Links, Proxies and Settings, with basic device presets and fewer customization controls.
+- Remove obsolete validation commands/settings and migrate existing saved settings while preserving profiles, queues and other user configuration.
+- Keep repetition disabled when Stop arrives during a settings save, and release failed endpoints after page-initiated navigation errors.
+- Update native and unit coverage for direct assignment, absent diagnostics, Austria and the simplified interface.
+
 ## 1.0.0-rc.1 — 2026-10-22
 
 Initial release candidate for Windows x64.

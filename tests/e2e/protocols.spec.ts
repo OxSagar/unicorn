@@ -12,7 +12,7 @@ test.afterEach(async () => {
   fixtures = undefined;
 });
 
-test('SOCKS5 performs a real handshake and proxies browser requests and HTTPS validation', async () => {
+test('SOCKS5 performs a real handshake and proxies actual browser requests without a preflight', async () => {
   fixtures = await createFixtures(1);
   await useSocks5Proxy(fixtures);
   harness = await launchUnicorn(fixtures, { proxyCount: 1 });
@@ -21,7 +21,8 @@ test('SOCKS5 performs a real handshake and proxies browser requests and HTTPS va
   expect(await browserEvaluate(harness, 1, 'window.fixtureReady')).toBe(true);
   const state = await snapshot(harness);
   expect(state.browsers[0]?.proxy?.protocol).toBe('socks5');
-  expect(state.browsers[0]?.proxy?.exitIp).toBe('8.8.0.1');
+  expect(state.browsers[0]?.proxy?.id).toBe(fixtures.proxies[0]!.record.id);
+  expect(fixtures.requests.filter((request) => request.path === '/diagnostic')).toEqual([]);
   expect(fixtures.proxies[0]!.tunnels).toBeGreaterThan(0);
   expect(fixtures.directRequests()).toBe(before);
   fixtures.proxies[0]!.fail();
@@ -29,6 +30,8 @@ test('SOCKS5 performs a real handshake and proxies browser requests and HTTPS va
     invoke(harness, { type: 'navigate', id: 1, url: `${fixtures.httpOrigin}/after-socks-failure` }),
   ).rejects.toThrow();
   expect(fixtures.directRequests()).toBe(before);
+  expect((await snapshot(harness)).proxies[0]).toMatchObject({ status: 'failed', failures: 1 });
+  expect(fixtures.requests.filter((request) => request.path === '/diagnostic')).toEqual([]);
 });
 
 test('HTTPS proxy uses a trusted TLS connection to the proxy and an HTTPS tunnel to the site', async () => {
@@ -47,4 +50,5 @@ test('HTTPS proxy uses a trusted TLS connection to the proxy and an HTTPS tunnel
   expect((await snapshot(harness)).browsers[0]?.proxy?.protocol).toBe('https');
   expect(fixtures.proxies[0]!.tunnels).toBeGreaterThan(0);
   expect(fixtures.directRequests()).toBe(before);
+  expect(fixtures.requests.filter((request) => request.path === '/diagnostic')).toEqual([]);
 });

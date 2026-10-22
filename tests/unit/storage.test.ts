@@ -31,6 +31,76 @@ describe('persistent state writer and recovery', () => {
     expect(DEFAULT_SETTINGS.timings.landingWaitMs).toBe(20000);
   });
 
+  it('migrates rc.1 validation options without losing profiles, advanced settings, queues or counters', async () => {
+    const state = initialData();
+    state.settings = {
+      ...state.settings,
+      browserCount: 3,
+      authorizedDomains: ['example.com'],
+      stagingConfirmed: true,
+      dailyNavigationLimit: 456,
+      dailyRequestLimit: 45678,
+      excludedLinkPatterns: ['*/logout*'],
+      retryLimit: 4,
+      proxyRefreshMinutes: 17,
+      allowLocalhost: true,
+      theme: 'light',
+      closeToTray: true,
+      minimizeToTray: true,
+      startAtLogin: true,
+      resourceLimitMb: 16384,
+      logRetentionDays: 31,
+      timings: { ...state.settings.timings, landingScrollMs: 1234, navigationTimeoutMs: 21000 },
+      schedule: { enabled: true, intervalMinutes: 17, startHour: 22, endHour: 6, resumeAfterRestart: true },
+    };
+    state.profiles[2] = {
+      device: {
+        ...DEVICES.desktop,
+        preset: 'custom',
+        width: 1365,
+        height: 1024,
+        scaleFactor: 1.25,
+        touch: true,
+      },
+      history: [{ url: 'https://example.com/retained?query=1', title: 'Retained page', at: 1234 }],
+    };
+    state.jobs = [job('reviewed', 'pending'), { ...job('completed', 'completed'), finishedAt: Date.now() }];
+    state.scheduleTemplates = [{ browserId: 2, url: 'https://example.com/recurring' }];
+    state.budget = { day: '2026-10-22', counts: { 'example.com': 7 } };
+    state.requestBudget = { day: '2026-10-22', counts: { 'example.com': 79 } };
+    state.totals = { completed: 12, failed: 2, navigations: 30, jsErrors: 1, networkErrors: 4 };
+    state.nextRunAt = Date.now() + 60000;
+    const legacy = { ...state, settings: { ...state.settings, proxyTimeoutMs: 45000, uniqueExitIps: false } };
+    await writeFile(join(directory, 'state.json'), JSON.stringify(legacy));
+    await mkdir(join(directory, 'Partitions', 'browser-02'), { recursive: true });
+    await writeFile(join(directory, 'Partitions', 'browser-02', 'marker'), 'existing Chromium data');
+
+    const store = new LocalStore(directory);
+    const restored = await store.load();
+    expect(restored).toEqual(state);
+    expect(restored.settings).not.toHaveProperty('proxyTimeoutMs');
+    expect(restored.settings).not.toHaveProperty('uniqueExitIps');
+    expect((await readdir(directory)).filter((name) => name.startsWith('state.corrupt-'))).toEqual([]);
+    expect(await readFile(join(directory, 'Partitions', 'browser-02', 'marker'), 'utf8')).toBe(
+      'existing Chromium data',
+    );
+    await store.save(restored);
+    expect(JSON.parse(await readFile(join(directory, 'state.json'), 'utf8'))).toEqual(state);
+    expect(await store.load()).toEqual(state);
+  });
+
+  it('does not make unknown stored settings permissive while migrating retired validation fields', async () => {
+    const state = initialData();
+    const content = JSON.stringify({
+      ...state,
+      settings: { ...state.settings, proxyTimeoutMs: 12000, uniqueExitIps: true, unknownPrivilege: true },
+    });
+    await writeFile(join(directory, 'state.json'), content);
+    expect((await new LocalStore(directory).load()).settings).toEqual(DEFAULT_SETTINGS);
+    const archived = (await readdir(directory)).find((name) => name.startsWith('state.corrupt-'))!;
+    expect(await readFile(join(directory, archived), 'utf8')).toBe(content);
+  });
+
   it('serializes concurrent saves and captures data when save is requested', async () => {
     const store = new LocalStore(directory);
     const data = await store.load();

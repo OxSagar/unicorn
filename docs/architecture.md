@@ -11,7 +11,7 @@ Unicorn is an Electron desktop application. It embeds the Chromium version bundl
 | `src/preload/index.ts`   | Three narrow bridge operations: command invocation, snapshot subscription and view geometry                | Trusted local dashboard only                                              |
 | `src/renderer/`          | React controls, queue and profile inspection, settings, logs and embedded-view layout                      | Sandboxed local UI                                                        |
 | `src/main/browser/`      | Native `WebContentsView` creation, lifecycle, persistent profiles, device settings, popups and diagnostics | Privileged coordinator of untrusted content                               |
-| `src/main/network/`      | Request gate, fixed-proxy configuration and independent exit-country verification                          | Privileged networking controls                                            |
+| `src/main/network/`      | Request gate, fixed-proxy configuration and transport/restriction classification                           | Privileged networking controls                                            |
 | `src/main/core/`         | Pure scope, state, distribution, validation, proxy-pool and scheduling logic                               | Independently unit-testable                                               |
 | `src/main/qa/`           | Cancellable stage timing, DOM link inspection and gradual scrolling                                        | Main-process orchestration; bounded script execution in an isolated world |
 
@@ -25,15 +25,15 @@ Shrinking the workspace closes excess views but retains their persistent profile
 
 Saved history is an application record. Unicorn does not silently restore and reload an old web page at startup; a proxy and an explicit eligible navigation must come first. Native back/forward entries exist for the current open view. The browser manager validates stored device configurations and falls back to the desktop preset if that small configuration record is invalid.
 
-Native browser views are positioned above the React window using measured panel rectangles. Hiding a panel hides its view without sharing its storage with another browser. Chromium background throttling is disabled for managed views so running QA timers do not silently stop when panels are hidden. This consumes more resources than discarding background tabs; the performance dashboard reports the cost.
+Native browser views are positioned above the React window using measured panel rectangles. Hiding a panel hides its view without sharing its storage with another browser. Chromium background throttling is disabled for managed views so running QA timers do not silently stop when panels are hidden. This consumes more resources than discarding background tabs; the compact troubleshooting section reports resource use.
 
 ## Network lifecycle
 
-Before a browser view is created, its session receives a deny-by-default request handler and a fixed loopback discard proxy. Acquisition reserves a unique candidate before awaiting network validation. The validator uses a bounded pool of four in-memory Chromium sessions; these sessions are reused so repeated validation does not create an unbounded number of session objects.
+Before a browser view is created, its session receives a deny-by-default request handler and a fixed loopback discard proxy. The pool reserves a unique eligible API endpoint synchronously and delivers it through a cancellation-aware Promise API. There is no proxy validator, diagnostic request, measured latency, observed exit IP, or independent exit-country check.
 
-The default validation request goes through the candidate proxy to `https://ipwho.is/`. The response must succeed over HTTPS and contain a valid exit IP and an allowed country matching the provider's country. TLS certificate errors are not overridden. A 30-second validation freshness window is configured by the controller; ordinary page transport failures still close the network gate.
+Country labels come from ProxyScrape and include US, GB, CA, FR, DE, JP, IT and AT. Endpoint syntax/public-address checks and duplicate IP/port exclusion remain local prerequisites. A real browser connection establishes whether an assigned endpoint works; recognized transport failures release and quarantine it within the bounded retry policy.
 
-The normal state sequence is `CREATED → WAITING_FOR_PROXY → VALIDATING_PROXY → READY → NAVIGATING → RUNNING`. QA completion enters `COMPLETED`, closes connections and releases the lease. Pause blocks session requests while retaining the lease. Resume restores that fixed proxy. Stop cancels the current operation, closes child views and connections, releases the lease and enters `STOPPED`.
+The normal state sequence is `CREATED → WAITING_FOR_PROXY → ASSIGNING_PROXY → READY → NAVIGATING → RUNNING`. QA completion enters `COMPLETED`, closes connections and releases the lease. Pause blocks session requests while retaining the lease. Resume restores that fixed proxy. Stop cancels the current operation, closes child views and connections, releases the lease and enters `STOPPED`.
 
 Fixed-proxy configurations never contain a `DIRECT` alternative. The bypass list subtracts Chromium's implicit loopback bypass using `<-loopback>`. Proxy assignment also checks Chromium's resolved proxy result. Each assignment has a generation number: a stop or newer assignment invalidates an older pending assignment before it can reopen the request gate.
 
@@ -41,7 +41,13 @@ Native mutations have an eight-second caller deadline. If a `setProxy` or `close
 
 The gate invokes a per-host request-budget check for every enabled HTTP, HTTPS or WebSocket request, followed by the navigation/scope check where applicable. Request and navigation budgets are persisted separately. `SiteRestrictionError` carries the actual restricted hostname within the main process, so redirected destinations and external QA stages stop the appropriate host's queued work. Renderer-facing messages retain the specific HTTP, quota or challenge failure without exposing new privileged APIs.
 
-ProxyScrape retrieval is a separate control-plane request made by Node. It does not run through a numbered browser profile. This allows proxy discovery before any browser proxy exists. Browser website requests, validator requests and provider requests are distinct in the implementation and documentation.
+ProxyScrape retrieval is a separate control-plane request made by Node. It does not run through a numbered browser profile. This allows proxy discovery before any browser proxy exists. Browser website requests and provider-list requests remain separate. There is no exit-diagnostic service dependency.
+
+## Simple interface
+
+Four primary pages serve the ordinary workflow: Browsers, Links, Proxies and Settings. Browser count, basic device presets and run controls remain prominent. Proxy status describes API-listed available/assigned/failed endpoints without verified-exit or latency labels. Advanced device/timing/quota customization is absent from the ordinary interface; saved values remain supported internally and are preserved when the visible settings change. Diagnostics and exports are secondary troubleshooting controls.
+
+Existing rc.1 saved settings are migrated by dropping only the obsolete proxy-validation timeout and exit-uniqueness fields before strict settings validation. Profiles, jobs, budgets and other preferences are restored normally. IPC commands still reject unknown fields and the removed reserve-validation command.
 
 ## Authorized QA and scheduling
 
@@ -84,7 +90,6 @@ Pure logic and network-gate tests exercise failure paths, cancellation, allocati
 - [Electron webContents and device emulation](https://www.electronjs.org/docs/latest/api/web-contents)
 - [Electron navigation history](https://www.electronjs.org/docs/latest/api/navigation-history)
 - [ProxyScrape public API](https://docs.proxyscrape.com/api-reference/public-api/get-proxy-list)
-- [IPWho.is diagnostic API](https://ipwhois.io/documentation)
 
 ## Heartbeat and renderer watchdog
 

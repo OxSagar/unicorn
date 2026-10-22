@@ -1,15 +1,6 @@
 import type { ReactNode } from 'react';
 import type { AppCommand, AppSnapshot, CommandResult } from '../shared/types';
-export type Page =
-  | 'dashboard'
-  | 'browsers'
-  | 'links'
-  | 'proxies'
-  | 'devices'
-  | 'schedules'
-  | 'logs'
-  | 'performance'
-  | 'settings';
+export type Page = 'browsers' | 'links' | 'proxies' | 'settings';
 export interface Actions {
   run: (command: AppCommand, success?: string) => Promise<CommandResult | undefined>;
   confirm: (title: string, message: string, action: () => void, destructive?: boolean) => void;

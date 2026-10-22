@@ -31,7 +31,6 @@ export async function launchUnicorn(
     stagingConfirmed: true,
     dailyNavigationLimit: 5000,
     retryLimit: 0,
-    proxyTimeoutMs: 3000,
     resourceLimitMb: 65536,
     timings: {
       landingWaitMs: 50,
@@ -51,7 +50,6 @@ export async function launchUnicorn(
     JSON.stringify({
       userData: join(directory, 'profile'),
       settings,
-      diagnosticUrl: fixtures.diagnosticUrl,
       proxies: fixtures.proxies.slice(0, options.proxyCount ?? 20).map((proxy) => proxy.record),
     }),
   );

@@ -175,10 +175,10 @@ describe('browser state machine', () => {
   it('does not navigate before proxy preparation', () => {
     expect(canTransition('CREATED', 'NAVIGATING')).toBe(false);
     expect(canTransition('WAITING_FOR_PROXY', 'NAVIGATING')).toBe(false);
-    expect(() => transition('VALIDATING_PROXY', 'NAVIGATING')).toThrow();
+    expect(() => transition('ASSIGNING_PROXY', 'NAVIGATING')).toThrow();
   });
   it('allows prepared navigation and bounded recovery transitions', () => {
-    expect(transition('VALIDATING_PROXY', 'READY')).toBe('READY');
+    expect(transition('ASSIGNING_PROXY', 'READY')).toBe('READY');
     expect(transition('READY', 'NAVIGATING')).toBe('NAVIGATING');
     expect(transition('RUNNING', 'PROXY_FAILED')).toBe('PROXY_FAILED');
     expect(transition('PROXY_FAILED', 'RETRY_WAIT')).toBe('RETRY_WAIT');

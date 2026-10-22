@@ -28,11 +28,7 @@ const testEnabled = !app.isPackaged && process.env.UNICORN_E2E === '1';
 async function start(): Promise<void> {
   if (testEnabled && process.env.UNICORN_TEST_CONFIG) {
     test = JSON.parse(await readFile(process.env.UNICORN_TEST_CONFIG, 'utf8')) as TestConfiguration;
-    if (
-      !path.isAbsolute(test.userData) ||
-      !Array.isArray(test.proxies) ||
-      !new URL(test.diagnosticUrl).hostname
-    )
+    if (!path.isAbsolute(test.userData) || !Array.isArray(test.proxies))
       throw new Error('Invalid local integration-test configuration');
     app.setPath('userData', test.userData);
   }

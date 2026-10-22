@@ -14,23 +14,24 @@ const proxy: ProxyRecord = {
   country: 'US',
   countryName: 'United States',
   status: 'available',
-  lastChecked: 1,
-  latencyMs: 1,
   failures: 0,
   source: 'fixture',
 };
 type Request = (
-  details: { url: string; resourceType: string },
+  details: { id: number; url: string; resourceType: string; webContentsId: number },
   done: (response: { cancel?: boolean }) => void,
 ) => void;
 type Headers = (
   details: { resourceType: string; statusCode: number; url: string },
   done: (response: object) => void,
 ) => void;
+type Failure = (details: { id: number; error: string; resourceType: string; webContentsId: number }) => void;
 
 function setup() {
   let request: Request = () => undefined;
   let headers: Headers | null = null;
+  let failure: Failure | null = null;
+  let requestId = 0;
   const fake = {
     setPermissionRequestHandler: vi.fn(),
     setPermissionCheckHandler: vi.fn(),
@@ -43,6 +44,9 @@ function setup() {
     ),
     closeAllConnections: vi.fn(async (): Promise<void> => undefined),
     resolveProxy: vi.fn(async () => 'PROXY 203.0.113.7:8080'),
+    fetch: vi.fn(async () => {
+      throw new Error('Assignment must never send a diagnostic request');
+    }),
     webRequest: {
       onBeforeRequest: vi.fn((_filter: object, handler: Request) => {
         request = handler;
@@ -51,7 +55,10 @@ function setup() {
       onHeadersReceived: vi.fn((handler: Headers | null) => {
         headers = handler;
       }),
-      onErrorOccurred: vi.fn(),
+      onErrorOccurred: vi.fn((handler: Failure | null) => {
+        failure = handler;
+      }),
+      onCompleted: vi.fn(),
     },
   };
   const hooks = {
@@ -66,8 +73,12 @@ function setup() {
     fake,
     hooks,
     gate,
-    request: (url: string, resourceType = 'mainFrame') =>
-      new Promise<{ cancel?: boolean }>((resolve) => request({ url, resourceType }, resolve)),
+    request: (url: string, resourceType = 'mainFrame', id = ++requestId, webContentsId = 7) =>
+      new Promise<{ cancel?: boolean }>((resolve) =>
+        request({ id, url, resourceType, webContentsId }, resolve),
+      ),
+    failure: (id: number, error: string, webContentsId = 7, resourceType = 'mainFrame') =>
+      failure?.({ id, error, resourceType, webContentsId }),
     response: (statusCode: number) =>
       headers?.({ statusCode, resourceType: 'mainFrame', url: 'https://authorized.test/' }, () => undefined),
   };
@@ -96,6 +107,7 @@ describe('session network gate', () => {
     });
     expect(await request('https://authorized.test/')).toEqual({ cancel: true });
     expect(fake.closeAllConnections).toHaveBeenCalledTimes(2);
+    expect(fake.fetch).not.toHaveBeenCalled();
   });
   it('rejects an unsafe Chromium direct proxy resolution', async () => {
     const { gate, fake } = setup();
@@ -130,6 +142,18 @@ describe('session network gate', () => {
     });
     await expect(gate.assign(proxy, abort.signal, true)).rejects.toThrow('Cancelled');
     expect(gate.isEnabled).toBe(false);
+  });
+  it('identifies current main-frame failures and ignores delayed errors from a previous route', async () => {
+    const { gate, hooks, request, failure } = setup();
+    await gate.assign(proxy, new AbortController().signal, false);
+    await request('https://authorized.test/old', 'mainFrame', 101, 7);
+    await gate.block();
+    await gate.assign(proxy, new AbortController().signal, false);
+    await request('https://authorized.test/new', 'mainFrame', 102, 7);
+    failure(101, 'net::ERR_PROXY_CONNECTION_FAILED');
+    expect(hooks.onFailure).not.toHaveBeenCalled();
+    failure(102, 'net::ERR_PROXY_CONNECTION_FAILED');
+    expect(hooks.onFailure).toHaveBeenCalledExactlyOnceWith('net::ERR_PROXY_CONNECTION_FAILED', true, 7);
   });
   it('permanently rejects the same session after a timed-out setProxy completes late, including after reopening', async () => {
     vi.useFakeTimers();

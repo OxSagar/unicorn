@@ -8,7 +8,7 @@ The application samples actual Electron process CPU and working-set memory every
 
 Balanced assignment scores each selected profile using pending/running job count plus its current renderer CPU percentage divided by 25 and working-set MB divided by 512. This documented heuristic defers assignment toward less busy renderers; it does not migrate existing jobs or predict arbitrary page cost.
 
-New QA jobs wait when the configured memory budget is exceeded. Existing browser profiles remain intact. Proxy validation uses at most four parallel Chromium validation sessions. Each browser has bounded retries and finite navigation/operation timeouts. A renderer watchdog probes eligible loaded pages every ten seconds, allows five seconds per probe, and stops a profile after two consecutive misses. Only confirmed eligible renderer exits can trigger bounded replay of an already accepted QA job. The same profile is retained; memory exhaustion and site restrictions require manual review. Captures, histories, queues, and logs have retention/size limits.
+New QA jobs wait when the configured memory budget is exceeded. Existing browser profiles remain intact. Proxy allocation uses API metadata directly and creates no validation sessions. Each browser has bounded retries and finite navigation/operation timeouts. A renderer watchdog probes eligible loaded pages every ten seconds, allows five seconds per probe, and stops a profile after two consecutive misses. Only confirmed eligible renderer exits can trigger bounded replay of an already accepted QA job. The same profile is retained; memory exhaustion and site restrictions require manual review. Captures, histories, queues, and logs have retention/size limits.
 
 ## Reference hardware guidance
 
@@ -16,7 +16,9 @@ For a large grid, begin with Windows 11 x64, a modern 8-core CPU, 16 GB RAM or m
 
 GitHub-hosted Windows runners are a verification environment; their available CPU/RAM vary and are not a substitute for a consumer-device benchmark. Concurrency tests attach real resource samples and response latency so the exact test run can be assessed.
 
-## Short-run evidence
+## Historical rc.1 short-run evidence
+
+The following measurements predate direct API assignment and the simpler rc.2 interface. Current release measurements and test counts are attached to that release's Actions run; these historical numbers are not rc.2 benchmark claims.
 
 The [Windows verification record](verification.md) and [machine-readable evidence](evidence/windows-candidate.json) identify the exact source SHA, run, test results and hardware. The hosted runner exposed four logical CPUs and 16,379 MiB RAM on Windows Server 2025. Native tests passed concurrent navigation at 1, 5, 10, 15 and 20 profiles, plus creation/resizing/closure at every count from 1 through 20.
 
@@ -40,4 +42,4 @@ Use a dedicated interactive Windows user session and owned local/staging sites w
 
 Verify that memory reaches a stable range after warmup, the UI remains responsive, no orphaned renderers accumulate, website storage survives a graceful restart, profile state stays isolated, failed proxies never produce direct requests, rate-limit responses stop work, and Windows suspend/resume does not create unexpected traffic. Analyze both successful and cancelled jobs and attach raw evidence.
 
-The 24-hour soak has not been completed for 1.0.0-rc.1. No long-duration stability guarantee is made.
+The 24-hour soak has not been completed for this release series. No long-duration stability guarantee is made.

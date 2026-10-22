@@ -43,6 +43,15 @@ function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+/** Disk-only rc.1 migration; IPC settings still reject unknown or removed fields. */
+function migrateStoredSettings(input: unknown): unknown {
+  if (!object(input)) return input;
+  const settings = { ...input };
+  delete settings.proxyTimeoutMs;
+  delete settings.uniqueExitIps;
+  return settings;
+}
+
 function browserId(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 20;
 }
@@ -183,7 +192,7 @@ export class LocalStore {
       if (info.size > 64 * 1024 * 1024) throw new Error('Saved state exceeds the supported size');
       const parsed: unknown = JSON.parse(await readFile(path.join(this.directory, 'state.json'), 'utf8'));
       if (!object(parsed) || parsed.schemaVersion !== 1) throw new Error('Unsupported settings schema');
-      const settings = validateSettings(parsed.settings);
+      const settings = validateSettings(migrateStoredSettings(parsed.settings));
       const value = initialData();
       value.settings = settings;
       value.profiles = restoreProfiles(parsed.profiles, settings);

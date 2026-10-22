@@ -1,27 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { AppCommand, AppSnapshot, CommandResult, PerformanceSnapshot } from '../shared/types';
+import type { AppCommand, AppSnapshot, CommandResult } from '../shared/types';
 import BrowserGrid from './BrowserGrid';
-import DevicesPage from './DevicesPage';
 import LinksPage from './LinksPage';
-import LogsPage from './LogsPage';
-import PerformancePage from './PerformancePage';
 import ProxiesPage from './ProxiesPage';
-import SchedulesPage from './SchedulesPage';
 import SettingsPage from './SettingsPage';
-import { Badge, Brand, Button, Icon, IconButton, Metric } from './components';
+import { Badge, Brand, Button, Icon, IconButton } from './components';
 import type { IconName } from './components';
 import type { Page, PageProps } from './ui-types';
 
 const navigation: Array<{ id: Page; label: string; icon: IconName }> = [
-  { id: 'dashboard', label: 'Dashboard', icon: 'grid' },
   { id: 'browsers', label: 'Browsers', icon: 'browser' },
-  { id: 'links', label: 'Link distribution', icon: 'link' },
+  { id: 'links', label: 'Links', icon: 'link' },
   { id: 'proxies', label: 'Proxies', icon: 'shield' },
-  { id: 'devices', label: 'Device profiles', icon: 'device' },
-  { id: 'schedules', label: 'Test schedules', icon: 'clock' },
-  { id: 'logs', label: 'Activity logs', icon: 'logs' },
-  { id: 'performance', label: 'Performance', icon: 'chart' },
   { id: 'settings', label: 'Settings', icon: 'settings' },
 ];
 type Notice = { id: number; message: string; level: 'success' | 'error' };
@@ -30,13 +21,12 @@ type Dialog = { title: string; content: ReactNode; action?: () => void; destruct
 export default function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [connectionError, setConnectionError] = useState('');
-  const [page, setPage] = useState<Page>('dashboard');
+  const [page, setPage] = useState<Page>('browsers');
   const [selected, setSelected] = useState<number[]>([]);
   const [browserCount, setBrowserCount] = useState(4);
   const [pendingCommands, setPendingCommands] = useState(0);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [dialog, setDialog] = useState<Dialog | null>(null);
-  const [history, setHistory] = useState<PerformanceSnapshot[]>([]);
   const initialized = useRef(false);
   const snapshotRef = useRef(snapshot);
   const noticeSequence = useRef(0);
@@ -54,12 +44,6 @@ export default function App() {
       setSelected(next.browsers.map((b) => b.id));
     } else
       setSelected((current) => current.filter((id) => next.browsers.some((browser) => browser.id === id)));
-    if (next.performance.sampledAt)
-      setHistory((previous) =>
-        previous.at(-1)?.sampledAt === next.performance.sampledAt
-          ? previous
-          : [...previous, next.performance].slice(-90),
-      );
   }, []);
   const run = useCallback(
     async (command: AppCommand, success?: string): Promise<CommandResult | undefined> => {
@@ -128,7 +112,7 @@ export default function App() {
   }, []);
   const navigatePage = useCallback(
     (next: Page) => {
-      if (next !== 'dashboard' && next !== 'browsers') hideViews();
+      if (next !== 'browsers') hideViews();
       setPage(next);
     },
     [hideViews],
@@ -193,8 +177,6 @@ export default function App() {
         <span className="startup-caption">INDEPENDENT PROFILES. ONE WORKSPACE.</span>
       </main>
     );
-  const active = snapshot.browsers.filter((b) => ['RUNNING', 'NAVIGATING'].includes(b.state)).length;
-  const assigned = snapshot.proxies.filter((p) => p.status === 'assigned').length;
   const queued = snapshot.jobs.filter((j) => j.status === 'pending').length;
   const props: PageProps = {
     snapshot,
@@ -211,20 +193,9 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <Brand />
-        <div className="workspace-tag">
-          <span className="workspace-monogram">U</span>
-          <div>
-            <strong>Local workspace</strong>
-            <small>Persistent profiles</small>
-          </div>
-          <Icon name="shield" size={15} />
-        </div>
-        <p className="nav-section-label">WORKSPACE</p>
         <nav aria-label="Main navigation">
-          {navigation.map((item, index) => (
+          {navigation.map((item) => (
             <div key={item.id}>
-              {index === 6 && <p className="nav-section-label second">MONITORING</p>}
-              {index === 8 && <div className="nav-divider" />}
               <button
                 className={`nav-item ${page === item.id ? 'active' : ''}`}
                 onClick={() => navigatePage(item.id)}
@@ -244,7 +215,7 @@ export default function App() {
             <strong>Proxy-only mode</strong>
             <Icon name="shield" size={14} />
           </div>
-          <p>Every connection starts with a verified proxy.</p>
+          <p>API-listed proxies. Separate browser profiles.</p>
           <div className="version-row">
             <span>Unicorn v{snapshot.version}</span>
             <span>CHROMIUM</span>
@@ -299,16 +270,17 @@ export default function App() {
             >
               {snapshot.scheduler.paused ? 'Resume all' : 'Start all'}
             </Button>
-            <IconButton
-              icon="pause"
-              label="Pause all tests"
-              onClick={() => void run({ type: 'global', action: 'pause' })}
-            />
-            <IconButton
+            <Button icon="pause" onClick={() => void run({ type: 'global', action: 'pause' })}>
+              Pause all
+            </Button>
+            <Button
               icon="stop"
-              label="Emergency stop all (Ctrl+Shift+S)"
+              variant="danger"
+              title="Emergency stop all (Ctrl+Shift+S)"
               onClick={() => void run({ type: 'global', action: 'stop' })}
-            />
+            >
+              Stop all
+            </Button>
           </div>
         </header>
         {notices.length > 0 && (
@@ -326,22 +298,13 @@ export default function App() {
             ))}
           </div>
         )}
-        <main
-          className={`main-content ${page === 'dashboard' || page === 'browsers' ? 'workspace-page' : ''}`}
-        >
-          {(page === 'dashboard' || page === 'browsers') && (
+        <main className={`main-content ${page === 'browsers' ? 'workspace-page' : ''}`}>
+          {page === 'browsers' && (
             <>
               <div className="dashboard-heading">
                 <div>
-                  <p className="eyebrow">
-                    {page === 'dashboard' ? 'YOUR TEST ENVIRONMENT' : 'INDEPENDENT SESSIONS'}
-                  </p>
-                  <h1>{page === 'dashboard' ? 'Workspace overview' : 'Browser workspace'}</h1>
-                  <p>
-                    {page === 'dashboard'
-                      ? 'A clear view of every session, connection, and test.'
-                      : 'Persistent Chromium profiles, managed from one place.'}
-                  </p>
+                  <h1>Browsers</h1>
+                  <p>Browse independently or add links to run a queue.</p>
                 </div>
                 <div className="workspace-health">
                   <span className={`status-dot ${snapshot.scheduler.running ? 'running' : ''}`} />
@@ -352,61 +315,31 @@ export default function App() {
                         ? 'Tests running'
                         : 'Workspace ready'}
                   </span>
-                  <Badge>{selected.length} selected</Badge>
+                  <Badge>{queued} queued</Badge>
                 </div>
               </div>
-              {page === 'dashboard' && (
-                <div className="metrics-grid dashboard-metrics">
-                  <Metric
-                    icon="browser"
-                    label="Active browsers"
-                    value={`${active} / ${snapshot.browsers.length}`}
-                    note={`${snapshot.browsers.length - active} idle or waiting`}
-                  />
-                  <Metric
-                    icon="shield"
-                    label="Proxy connections"
-                    value={assigned}
-                    note={`${snapshot.proxies.filter((p) => p.status === 'available').length} verified in reserve`}
-                  />
-                  <Metric
-                    icon="check"
-                    label="Completed tests"
-                    value={snapshot.totals.completed}
-                    note={`${queued} tests in queue`}
-                  />
-                  <Metric
-                    icon="chart"
-                    label="App memory"
-                    value={`${Math.round(snapshot.performance.memoryMb).toLocaleString()} MB`}
-                    note={`${snapshot.performance.cpuPercent.toFixed(1)}% CPU · ${snapshot.totals.jsErrors} JS errors`}
-                  />
-                </div>
-              )}
               {(!snapshot.settings.authorizedDomains.length || !snapshot.settings.stagingConfirmed) && (
                 <div className="scope-banner">
                   <div className="scope-icon">
                     <Icon name="shield" size={19} />
                   </div>
                   <div>
-                    <strong>Set up your authorized testing scope</strong>
+                    <strong>Choose your approved websites</strong>
                     <span>
                       Add approved domains and confirm your staging or test-ad environment before starting
                       automated runs.
                     </span>
                   </div>
                   <Button icon="arrow" variant="ghost" onClick={() => navigatePage('settings')}>
-                    Configure
+                    Open settings
                   </Button>
                 </div>
               )}
-              <BrowserGrid {...props} blocked={!!dialog} compact={page === 'browsers'} />
+              <BrowserGrid {...props} blocked={!!dialog} />
             </>
           )}
-          {page === 'links' && <LinksPage {...props} />} {page === 'proxies' && <ProxiesPage {...props} />}{' '}
-          {page === 'devices' && <DevicesPage {...props} />}{' '}
-          {page === 'schedules' && <SchedulesPage {...props} />} {page === 'logs' && <LogsPage {...props} />}{' '}
-          {page === 'performance' && <PerformancePage {...props} history={history} />}{' '}
+          {page === 'links' && <LinksPage {...props} />}
+          {page === 'proxies' && <ProxiesPage {...props} />}
           {page === 'settings' && <SettingsPage {...props} />}
         </main>
         <footer className="app-statusbar">
