@@ -28,7 +28,7 @@ The public provider is ProxyScrape. API country metadata is filtered to US, GB, 
 
 The pool reserves endpoints synchronously, preventing two active browsers from racing for the same IP/port. Different endpoints may share an observed public exit; exit-IP uniqueness is no longer checked or advertised. Release/cancellation invalidates undelivered assignments, and provider refresh preserves active leases.
 
-Browser assignment still configures Chromium's fixed-server route with no DIRECT fallback, checks the selected route and retains the closed gate until configuration completes. Those local routing checks do not contact a diagnostic service. HTTPS destination certificates continue to be checked normally. Removing proxy preflight does not disable TLS verification.
+Browser assignment still configures Chromium's fixed-server route with no DIRECT fallback, waits for native proxy-state reload, and requires the selected route to match the assigned protocol, IP and port exactly before opening the gate. Those local routing checks do not contact a diagnostic service. HTTPS destination certificates continue to be checked normally. Removing proxy preflight does not disable TLS verification.
 
 Recognized failures during actual browser connections release and temporarily quarantine the endpoint. QA retries remain bounded. HTTP 401, 403 and 429, challenges, certificate failures, application deadlines and unrecognized errors stop the relevant work rather than triggering rotation around restrictions. Public proxy coverage and availability remain outside Unicorn's control.
 

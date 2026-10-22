@@ -3,18 +3,83 @@ import os from 'node:os';
 import { createFixtures, type BrowserFixtures } from '../fixtures/servers';
 import { launchUnicorn, closeHarness, invoke, snapshot, browserEvaluate, type Harness } from './helpers';
 import { DEFAULT_SETTINGS, DEVICES } from '../../src/shared/defaults';
+import type { AppSnapshot } from '../../src/shared/types';
+import { withDeadline } from '../../src/main/browser/deadline';
 
 let fixtures: BrowserFixtures;
 let harness: Harness | undefined;
+let concurrencyStartedAt: number | undefined;
 test.beforeAll(async () => {
   fixtures = await createFixtures(20);
 });
 test.afterAll(async () => {
   await fixtures.close();
 });
-test.afterEach(async () => {
-  await closeHarness(harness);
-  harness = undefined;
+test.afterEach(async ({}, testInfo) => {
+  try {
+    if (harness && concurrencyStartedAt && testInfo.status !== testInfo.expectedStatus) {
+      const runtime = await withDeadline(
+        harness.app.evaluate(async () => {
+          const { controller, manager } = (
+            globalThis as unknown as {
+              __unicornTest: {
+                controller: { snapshot(): AppSnapshot };
+                manager: { getWebContents(id: number): Electron.WebContents };
+              };
+            }
+          ).__unicornTest;
+          const state = controller.snapshot();
+          const routes = await Promise.all(
+            state.browsers.map(async (browser) => {
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              try {
+                const contents = manager.getWebContents(browser.id);
+                const url = contents.getURL() || 'https://unicorn.invalid/';
+                const resolution = await Promise.race([
+                  contents.session.resolveProxy(url),
+                  new Promise<never>((_resolve, reject) => {
+                    timer = setTimeout(() => reject(new Error('Route inspection timed out')), 2000);
+                  }),
+                ]);
+                return { browserId: browser.id, url, resolution };
+              } catch (error) {
+                return { browserId: browser.id, error: String(error) };
+              } finally {
+                clearTimeout(timer);
+              }
+            }),
+          );
+          return { capturedAt: Date.now(), state, routes };
+        }),
+        5000,
+      ).catch((error: unknown) => ({ error: String(error) }));
+      await testInfo.attach('concurrency-failure-diagnostics.json', {
+        body: JSON.stringify(
+          {
+            startedAt: concurrencyStartedAt,
+            errors: testInfo.errors,
+            scope:
+              'Post-failure routes may already be blocked; assignment logs record the exact route checked before enabling requests. Route inspection sends no network request.',
+            runtime,
+            fixtureRequests: fixtures.requests.filter((request) => request.at >= concurrencyStartedAt!),
+            fixtureProxies: fixtures.proxies.map((proxy) => ({
+              endpoint: proxy.record,
+              totalRequests: proxy.requests,
+              totalTunnels: proxy.tunnels,
+              traffic: proxy.traffic.filter((request) => request.at >= concurrencyStartedAt!),
+            })),
+          },
+          null,
+          2,
+        ),
+        contentType: 'application/json',
+      });
+    }
+  } finally {
+    await closeHarness(harness);
+    harness = undefined;
+    concurrencyStartedAt = undefined;
+  }
 });
 
 test('real JavaScript, Fetch, IndexedDB, CacheStorage, service worker and isolated privileged APIs', async () => {
@@ -238,6 +303,7 @@ for (const count of [1, 5, 10, 15, 20])
     await invoke(harness, { type: 'create', count });
     const before = fixtures.directRequests();
     const started = Date.now();
+    concurrencyStartedAt = started;
     await Promise.all(
       Array.from({ length: count }, (_, index) =>
         invoke(harness!, {

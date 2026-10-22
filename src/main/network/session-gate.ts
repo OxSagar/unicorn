@@ -10,6 +10,12 @@ export function proxyRule(proxy: ProxyRecord): string {
   return `${proxy.protocol}://${host}:${proxy.port}`;
 }
 
+function expectedResolution(proxy: ProxyRecord): string {
+  const host = proxy.ip.includes(':') ? `[${proxy.ip}]` : proxy.ip;
+  const protocol = { http: 'PROXY', https: 'HTTPS', socks5: 'SOCKS5' }[proxy.protocol];
+  return `${protocol} ${host}:${proxy.port}`;
+}
+
 export interface GateHooks {
   approveRequest?(url: string): void;
   approveNavigation(url: string, mainFrame: boolean): void;
@@ -184,11 +190,12 @@ export class SessionGate {
     });
   }
 
-  async assign(proxy: ProxyRecord, signal: AbortSignal, synthetic: boolean): Promise<void> {
+  async assign(proxy: ProxyRecord, signal: AbortSignal, synthetic: boolean): Promise<string> {
     const generation = ++this.state.generation;
     this.enabled = false;
     this.headersEnabled = false;
     this.mainFrameGenerations.clear();
+    let resolution = '';
     await this.serial(async () => {
       this.assertUsable();
       signal.throwIfAborted();
@@ -202,23 +209,28 @@ export class SessionGate {
           }),
         signal,
       );
+      // setProxy updates preferences before Chromium's network service necessarily
+      // observes them. Reload its configuration, then independently require the
+      // exact reserved route; reload alone does not prove which config was applied.
+      await this.mutation(() => this.session.forceReloadProxyConfig(), signal);
       signal.throwIfAborted();
-      const resolution = await withDeadline(
-        this.session.resolveProxy('https://unicorn.invalid/'),
-        8000,
-        signal,
-      );
+      resolution = (
+        await withDeadline(this.session.resolveProxy('https://unicorn.invalid/'), 8000, signal)
+      ).trim();
       signal.throwIfAborted();
       this.assertUsable();
       if (generation !== this.state.generation)
         throw new Error('Proxy assignment was superseded by a network stop');
-      if (/\bDIRECT\b/i.test(resolution) || !/^(PROXY|HTTPS|SOCKS5) /i.test(resolution)) {
-        throw new Error(`Unsafe proxy resolution: ${resolution}`);
-      }
+      const expected = expectedResolution(proxy);
+      if (resolution !== expected)
+        throw new Error(
+          `Unsafe proxy resolution: expected ${expected}; Chromium returned ${resolution || '(empty)'}`,
+        );
       this.headersEnabled = synthetic;
       this.enabledGeneration = generation;
       this.enabled = true;
     });
+    return resolution;
   }
 
   dispose(): void {

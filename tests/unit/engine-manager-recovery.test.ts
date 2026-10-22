@@ -71,6 +71,7 @@ class GateDouble {
     signal.throwIfAborted();
     if (this.session.poisoned) throw new Error('Session is poisoned; restart Unicorn');
     this.isEnabled = true;
+    return `PROXY ${_proxy.ip}:${_proxy.port}`;
   });
   readonly dispose = vi.fn(() => {
     this.isEnabled = false;

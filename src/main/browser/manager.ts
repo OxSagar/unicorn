@@ -659,14 +659,15 @@ export class BrowserManager {
     }
     await control?.checkpoint();
     entry.snapshot.proxy = proxy;
+    let resolution: string;
     try {
-      await entry.gate.assign(proxy, signal, synthetic);
+      resolution = await entry.gate.assign(proxy, signal, synthetic);
     } catch (error) {
       if (!control?.isPaused || signal.aborted) throw error;
       // A pause can supersede an in-flight Chromium proxy-configuration call.
       // Keep its reservation and complete the same assignment after resume.
       await control.checkpoint();
-      await entry.gate.assign(proxy, signal, synthetic);
+      resolution = await entry.gate.assign(proxy, signal, synthetic);
     }
     if (!entry.view.webContents.debugger.isAttached())
       await applyDevice(entry.view.webContents, entry.snapshot.device);
@@ -675,7 +676,7 @@ export class BrowserManager {
       entry,
       'info',
       'proxy',
-      `${proxy.country} ${proxy.protocol.toUpperCase()} endpoint assigned using provider country metadata`,
+      `${proxy.country} ${proxy.protocol.toUpperCase()} endpoint assigned using provider country metadata; Chromium route ${resolution}`,
     );
   }
 
