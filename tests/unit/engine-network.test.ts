@@ -205,7 +205,7 @@ describe('session network gate', () => {
     failure(102, 'net::ERR_PROXY_CONNECTION_FAILED');
     expect(hooks.onFailure).toHaveBeenCalledExactlyOnceWith('net::ERR_PROXY_CONNECTION_FAILED', true, 7);
   });
-  it.each(['setProxy', 'forceReloadProxyConfig'] as const)(
+  it.each(['closeAllConnections', 'setProxy', 'forceReloadProxyConfig'] as const)(
     'permanently rejects the same session after timed-out %s completes late, including after reopening',
     async (method) => {
       vi.useFakeTimers();
@@ -218,22 +218,54 @@ describe('session network gate', () => {
           }),
       );
       const assignment = gate.assign(proxy, new AbortController().signal, true);
-      const failure = expect(assignment).rejects.toThrow('timed out after 8000 ms');
+      const failure = assignment.catch((error: unknown) => error);
       await vi.advanceTimersByTimeAsync(8000);
-      await failure;
+      const error = await failure;
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(
+        `assign.${method} (elapsed 8000 ms; generation 2; current generation 2): Browser operation timed out after 8000 ms`,
+      );
       expect(gate.isEnabled).toBe(false);
-      await expect(gate.assign(proxy, new AbortController().signal, true)).rejects.toThrow('restart Unicorn');
+      await expect(gate.assign(proxy, new AbortController().signal, true)).rejects.toBe(error);
       gate.dispose();
       const reopened = new SessionGate(fake as unknown as Session, hooks);
-      await expect(reopened.assign(proxy, new AbortController().signal, true)).rejects.toThrow(
-        'restart Unicorn',
-      );
+      await expect(reopened.assign(proxy, new AbortController().signal, true)).rejects.toBe(error);
       complete();
       await vi.advanceTimersByTimeAsync(0);
       expect(reopened.isEnabled).toBe(false);
       expect(await request('https://authorized.test/')).toEqual({ cancel: true });
-      expect(fake.setProxy).toHaveBeenCalledTimes(1);
+      expect(fake.setProxy).toHaveBeenCalledTimes(method === 'closeAllConnections' ? 0 : 1);
       expect(fake.resolveProxy).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+  it.each(['setProxy', 'closeAllConnections'] as const)(
+    'identifies an initial block.%s stall before any proxy assignment or page exists',
+    async (method) => {
+      vi.useFakeTimers();
+      const { gate, fake, request } = setup();
+      let complete!: () => void;
+      fake[method].mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            complete = resolve;
+          }),
+      );
+      const failure = gate.block().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(8000);
+      const error = await failure;
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(
+        `block.${method} (elapsed 8000 ms; generation 2; current generation 2): Browser operation timed out after 8000 ms`,
+      );
+      expect(fake.forceReloadProxyConfig).not.toHaveBeenCalled();
+      expect(fake.resolveProxy).not.toHaveBeenCalled();
+      expect(await request('https://authorized.test/')).toEqual({ cancel: true });
+      complete();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(gate.assign(proxy, new AbortController().signal, false)).rejects.toBe(error);
+      expect(gate.isEnabled).toBe(false);
+      expect(fake.fetch).not.toHaveBeenCalled();
       expect(vi.getTimerCount()).toBe(0);
     },
   );
@@ -255,6 +287,9 @@ describe('session network gate', () => {
       abort.abort(new Error('Stopped during native configuration'));
       await failure;
       await expect(gate.assign(proxy, new AbortController().signal, false)).rejects.toThrow(
+        `assign.${method}`,
+      );
+      await expect(gate.assign(proxy, new AbortController().signal, false)).rejects.toThrow(
         'restart Unicorn',
       );
       complete();
@@ -264,6 +299,41 @@ describe('session network gate', () => {
       expect(fake.resolveProxy).not.toHaveBeenCalled();
     },
   );
+  it('preserves the original failure context when Stop supersedes an in-flight native reload', async () => {
+    vi.useFakeTimers();
+    const { gate, fake, request } = setup();
+    const abort = new AbortController();
+    let complete!: () => void;
+    fake.forceReloadProxyConfig.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const assignment = gate.assign(proxy, abort.signal, false).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(complete).toBeTypeOf('function');
+    await vi.advanceTimersByTimeAsync(125);
+    const stopped = gate.block().catch((error: unknown) => error);
+    expect(await request('https://authorized.test/')).toEqual({ cancel: true });
+    expect(fake.closeAllConnections).toHaveBeenCalledTimes(1);
+    expect(fake.setProxy).toHaveBeenCalledTimes(1);
+    abort.abort(new Error('Stopped during native configuration'));
+    const error = await assignment;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(
+      'assign.forceReloadProxyConfig (elapsed 125 ms; generation 2; current generation 3): Stopped during native configuration',
+    );
+    expect(await stopped).toBe(error);
+    expect(fake.setProxy).toHaveBeenCalledTimes(1);
+    expect(fake.closeAllConnections).toHaveBeenCalledTimes(2);
+    complete();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(gate.isEnabled).toBe(false);
+    expect(fake.resolveProxy).not.toHaveBeenCalled();
+    expect(await request('https://authorized.test/')).toEqual({ cancel: true });
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it('keeps requests blocked when Stop races with a native reload that later completes', async () => {
     const { gate, fake, request } = setup();
     let complete!: () => void;

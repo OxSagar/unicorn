@@ -6,22 +6,47 @@ import type { AppCommand, AppSettings, AppSnapshot, CommandResult } from '../../
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import type { BrowserFixtures } from '../fixtures/servers';
 import { closeElectronApplication } from './close-electron';
+import {
+  assertDiagnosticFixtures,
+  startHarnessDiagnostics,
+  stopHarnessDiagnostics,
+  type HarnessDiagnostics,
+} from './diagnostics';
+
+export { attachFailureDiagnostics } from './diagnostics';
 
 export interface Harness {
   app: ElectronApplication;
   page: Page;
   directory: string;
   configPath: string;
+  diagnostics?: HarnessDiagnostics;
 }
 interface Runtime {
   manager: { getWebContents(id: number): Electron.WebContents };
   controller: { snapshot(): AppSnapshot };
 }
 
+export interface LaunchOptions {
+  directory?: string;
+  proxyCount?: number;
+  settings?: Partial<AppSettings>;
+  diagnostics?: boolean;
+}
+
+export async function launchUnicornWithDiagnostics(
+  fixtures: BrowserFixtures,
+  options: LaunchOptions = {},
+): Promise<Harness> {
+  return launchUnicorn(fixtures, { ...options, diagnostics: true });
+}
+
 export async function launchUnicorn(
   fixtures: BrowserFixtures,
-  options: { directory?: string; proxyCount?: number; settings?: Partial<AppSettings> } = {},
+  options: LaunchOptions = {},
 ): Promise<Harness> {
+  if (options.diagnostics) assertDiagnosticFixtures(fixtures);
+  const launchedAt = Date.now();
   const directory = options.directory ?? (await mkdtemp(join(tmpdir(), 'unicorn-e2e-')));
   const settings: AppSettings = {
     ...structuredClone(DEFAULT_SETTINGS),
@@ -59,7 +84,11 @@ export async function launchUnicorn(
     env: { ...process.env, UNICORN_E2E: '1', UNICORN_TEST_CONFIG: configPath },
     timeout: 45000,
   });
+  let diagnostics: HarnessDiagnostics | undefined;
   try {
+    // Observe before returning the harness, including subsequent profile creation.
+    // This is test-only metadata logging; it does not configure or probe proxies.
+    if (options.diagnostics) diagnostics = await startHarnessDiagnostics(app, directory, launchedAt);
     let host: Page | undefined;
     await expect
       .poll(
@@ -82,8 +111,9 @@ export async function launchUnicorn(
     await page.waitForFunction(
       async () => (await window.unicorn.invoke({ type: 'snapshot' })).snapshot.browsers.length > 0,
     );
-    return { app, page, directory, configPath };
+    return { app, page, directory, configPath, diagnostics };
   } catch (error) {
+    await stopHarnessDiagnostics(app, diagnostics);
     await closeElectronApplication(app).catch((cleanupError) => {
       console.error('Electron startup cleanup also failed:', cleanupError);
     });
@@ -109,5 +139,6 @@ export function browserEvaluate<T>(harness: Harness, id: number, source: string)
 }
 export async function closeHarness(harness: Harness | undefined): Promise<void> {
   if (!harness) return;
+  await stopHarnessDiagnostics(harness.app, harness.diagnostics);
   await closeElectronApplication(harness.app);
 }

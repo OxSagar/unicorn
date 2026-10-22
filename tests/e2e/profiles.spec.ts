@@ -2,7 +2,15 @@ import { expect, test } from '@playwright/test';
 import { DEVICES } from '../../src/shared/defaults';
 import type { BrowserSnapshot } from '../../src/shared/types';
 import { createFixtures, type BrowserFixtures } from '../fixtures/servers';
-import { browserEvaluate, closeHarness, invoke, launchUnicorn, snapshot, type Harness } from './helpers';
+import {
+  attachFailureDiagnostics,
+  browserEvaluate,
+  closeHarness,
+  invoke,
+  launchUnicornWithDiagnostics as launchUnicorn,
+  snapshot,
+  type Harness,
+} from './helpers';
 
 interface SiteData {
   cookie: string;
@@ -51,11 +59,16 @@ test.beforeEach(async () => {
     expect(originalSites[id - 1]!.databases).toContain('unicorn-profile-cleanup');
   }
 });
-test.afterEach(async () => {
+test.afterEach(async ({}, testInfo) => {
   try {
-    await closeHarness(harness);
+    if (testInfo.status !== testInfo.expectedStatus)
+      await attachFailureDiagnostics(harness, fixtures, testInfo);
   } finally {
-    harness = undefined;
+    try {
+      await closeHarness(harness);
+    } finally {
+      harness = undefined;
+    }
   }
 });
 test.afterAll(async () => {
