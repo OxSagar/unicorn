@@ -14,11 +14,11 @@ export interface FixtureProxy {
   stall(): void;
   requests: number;
   tunnels: number;
+  traffic: Array<{ kind: 'request' | 'connect'; target: string; at: number }>;
 }
 export interface BrowserFixtures {
   httpOrigin: string;
   httpsOrigin?: string;
-  diagnosticUrl: string;
   proxies: FixtureProxy[];
   requests: Array<{ path: string; host: string; proxied: boolean; at: number }>;
   directRequests(): number;
@@ -35,7 +35,12 @@ const listen = (server: Server) =>
 
 export async function createFixtures(
   count = 20,
-  options: { untrustedCertificate?: boolean; secureProxy?: boolean; certificateDirectory?: string } = {},
+  options: {
+    untrustedCertificate?: boolean;
+    secureProxy?: boolean;
+    certificateDirectory?: string;
+    diagnosticUnavailable?: boolean;
+  } = {},
 ): Promise<BrowserFixtures> {
   const sockets = new Set<net.Socket>();
   const timers = new Set<ReturnType<typeof setTimeout>>();
@@ -63,17 +68,6 @@ export async function createFixtures(
     server.on('clientError', (_error, socket) => socket.destroy());
     return server;
   };
-  const diagnostic = (proxyNumber: number, response: http.ServerResponse) => {
-    response.setHeader('Content-Type', 'application/json');
-    response.end(
-      JSON.stringify({
-        success: true,
-        ip: `8.8.0.${proxyNumber}`,
-        country_code: 'US',
-        country: 'United States',
-      }),
-    );
-  };
   const handler: http.RequestListener = (request, response) => {
     const requested = new URL(request.url ?? '/', 'http://localhost');
     const path = requested.pathname;
@@ -82,7 +76,17 @@ export async function createFixtures(
       proxiedPorts.has(request.socket.remotePort ?? 0);
     requests.push({ path, host: request.headers.host ?? '', proxied, at: Date.now() });
     if (path === '/diagnostic') {
-      diagnostic(Number(request.headers['x-unicorn-fixture-proxy'] ?? 1), response);
+      // A trap for forbidden preflight traffic, never configured as an app input.
+      // Controlled tests prove neither a conflicting result nor an outage gates assignment.
+      response.setHeader('Content-Type', 'application/json');
+      response.statusCode = options.diagnosticUnavailable ? 503 : 200;
+      response.end(
+        JSON.stringify(
+          options.diagnosticUnavailable
+            ? { success: false, message: 'Diagnostic service unavailable' }
+            : { success: true, ip: '8.8.8.8', country_code: 'US', country: 'United States' },
+        ),
+      );
       return;
     }
     if (path === '/forbidden' || path === '/limited') {
@@ -202,7 +206,6 @@ export async function createFixtures(
   const secure = tls ? track(https.createServer(tls, handler)) : undefined;
   const httpsPort = secure ? await listen(secure) : undefined;
   const httpsOrigin = httpsPort ? `https://127.0.0.1:${httpsPort}` : undefined;
-  const diagnosticUrl = `${httpsOrigin ?? httpOrigin}/diagnostic`;
   // A real WebSocket handshake and data frame, requiring no websocket mock in Chromium.
   for (const target of [plain, secure].filter(Boolean) as Server[])
     target.on('upgrade', (request, socket) => {
@@ -226,10 +229,6 @@ export async function createFixtures(
     let failed = false;
     let stalled = false;
     const ownSockets = new Set<net.Socket>();
-    const tlsDiagnostic = tls
-      ? track(https.createServer(tls, (_req, response) => diagnostic(index, response)))
-      : undefined;
-    const diagnosticPort = tlsDiagnostic ? await listen(tlsDiagnostic) : undefined;
     const record: ProxyRecord = {
       id: '',
       ip: '127.0.0.1',
@@ -237,9 +236,7 @@ export async function createFixtures(
       protocol: options.secureProxy ? 'https' : 'http',
       country: 'US',
       countryName: 'United States (controlled fixture)',
-      status: 'unverified',
-      lastChecked: null,
-      latencyMs: null,
+      status: 'available',
       failures: 0,
       source: 'fixture',
     };
@@ -247,6 +244,7 @@ export async function createFixtures(
       record,
       requests: 0,
       tunnels: 0,
+      traffic: [],
       fail() {
         failed = true;
         for (const socket of ownSockets) socket.destroy();
@@ -261,6 +259,7 @@ export async function createFixtures(
     };
     const listener = track(
       createProxyServer((request, response) => {
+        proxy.traffic.push({ kind: 'request', target: request.url ?? '', at: Date.now() });
         if (failed) {
           request.socket.destroy();
           return;
@@ -303,6 +302,7 @@ export async function createFixtures(
       socket.on('close', () => ownSockets.delete(socket));
     });
     listener.on('connect', (request, client, head) => {
+      proxy.traffic.push({ kind: 'connect', target: request.url ?? '', at: Date.now() });
       if (failed) {
         client.destroy();
         return;
@@ -321,21 +321,15 @@ export async function createFixtures(
         return;
       }
       const requestedPort = Number(target.port || 443);
-      // Diagnostics share a local hostname but use a distinct authority to allow per-proxy observed exits.
-      const isDiagnostic = diagnosticAuthority !== '' && request.url === diagnosticAuthority;
       let upstreamPort: number | undefined;
-      const upstream = net.connect(
-        isDiagnostic && diagnosticPort ? diagnosticPort : requestedPort,
-        '127.0.0.1',
-        () => {
-          upstreamPort = upstream.localPort;
-          if (upstreamPort) proxiedPorts.add(upstreamPort);
-          client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-          if (head.length) upstream.write(head);
-          client.pipe(upstream);
-          upstream.pipe(client);
-        },
-      );
+      const upstream = net.connect(requestedPort, '127.0.0.1', () => {
+        upstreamPort = upstream.localPort;
+        if (upstreamPort) proxiedPorts.add(upstreamPort);
+        client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (head.length) upstream.write(head);
+        client.pipe(upstream);
+        upstream.pipe(client);
+      });
       sockets.add(upstream);
       ownSockets.add(upstream);
       upstream.on('error', () => client.destroy());
@@ -353,19 +347,9 @@ export async function createFixtures(
     record.id = `${record.protocol}://127.0.0.1:${port}`;
     proxies.push(proxy);
   }
-  // Separate diagnostic authority: normal HTTPS pages still reach the shared fixture site.
-  let diagnosticAuthority = '';
-  let effectiveDiagnostic = diagnosticUrl;
-  if (tls) {
-    const diagnosticAnchor = track(https.createServer(tls, (_req, response) => diagnostic(1, response)));
-    const port = await listen(diagnosticAnchor);
-    diagnosticAuthority = `127.0.0.1:${port}`;
-    effectiveDiagnostic = `https://${diagnosticAuthority}/diagnostic`;
-  }
   return {
     httpOrigin,
     httpsOrigin,
-    diagnosticUrl: effectiveDiagnostic,
     proxies,
     requests,
     directRequests: () => requests.filter((request) => !request.proxied).length,

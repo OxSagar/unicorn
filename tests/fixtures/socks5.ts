@@ -118,6 +118,9 @@ export async function useSocks5Proxy(fixtures: BrowserFixtures, index = 0): Prom
     get tunnels() {
       return original.tunnels;
     },
+    get traffic() {
+      return original.traffic;
+    },
     fail() {
       failed = true;
       for (const socket of sockets) socket.destroy();

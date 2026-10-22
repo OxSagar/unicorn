@@ -9,7 +9,7 @@ interface StabilitySample {
   elapsedMs: number;
   phase: 'warmup' | 'scheduled' | 'stopped';
   jobs: Record<'completed' | 'failed' | 'cancelled' | 'pending' | 'running', number>;
-  leases: Array<{ browserId: number; proxyId: string; exitIp?: string }>;
+  leases: Array<{ browserId: number; proxyId: string; endpoint: string }>;
   performance: AppSnapshot['performance'];
   uiRoundtripMs: number;
 }
@@ -42,7 +42,11 @@ test('twenty profiles complete three real minute-interval QA cycles from one Sta
     latest = state;
     const leases = state.proxies
       .filter((proxy) => proxy.assignedTo !== undefined)
-      .map((proxy) => ({ browserId: proxy.assignedTo!, proxyId: proxy.id, exitIp: proxy.exitIp }));
+      .map((proxy) => ({
+        browserId: proxy.assignedTo!,
+        proxyId: proxy.id,
+        endpoint: `${proxy.ip}:${proxy.port}`,
+      }));
     samples.push({
       elapsedMs: Date.now() - startedAt,
       phase,
@@ -59,11 +63,11 @@ test('twenty profiles complete three real minute-interval QA cycles from one Sta
     });
     expect(new Set(leases.map((lease) => lease.browserId)).size).toBe(leases.length);
     expect(new Set(leases.map((lease) => lease.proxyId)).size).toBe(leases.length);
-    expect(leases.every((lease) => Boolean(lease.exitIp))).toBe(true);
-    expect(new Set(leases.map((lease) => lease.exitIp)).size).toBe(leases.length);
+    expect(new Set(leases.map((lease) => lease.endpoint)).size).toBe(leases.length);
     expect(uiRoundtripMs, 'The trusted dashboard bridge must remain responsive').toBeLessThan(5000);
     expect(state.jobs.filter((job) => ['failed', 'cancelled'].includes(job.status))).toEqual([]);
     expect(fixtures.directRequests()).toBe(0);
+    expect(fixtures.requests.filter((request) => request.path === '/diagnostic')).toEqual([]);
     return state;
   }
 

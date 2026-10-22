@@ -1,32 +1,36 @@
-# Unicorn 1.0.0-rc.1
+# Unicorn 1.0.0-rc.2
 
-Unicorn is a Windows desktop workspace for up to 20 independent Chromium sessions, device compatibility testing, verified proxy allocation, and authorized website QA.
+This update removes proxy preflight validation, adds Austria, and simplifies Unicorn's interface.
 
-## Included
+## Changes
 
-Persistent profiles; native browser grid and focused inspection; desktop/mobile/tablet/custom device emulation; ProxyScrape HTTP CONNECT and SOCKS5 proxy ingestion; US/GB/CA/FR/DE/JP/IT filtering; live HTTPS exit verification; atomic endpoint and exit-IP allocation; URL import/distribution; scoped QA stages; scheduling and daily navigation/request budgets; pause/resume/emergency stop; managed popups; reviewed queue editing and preserved input drafts; custom link exclusions; local logs/results; resource and heartbeat monitoring; bounded automatic QA renderer recovery; renderer health checks; tray and login controls.
+- Assign eligible ProxyScrape endpoints directly from the API. There is no diagnostic request, exit-IP lookup, country recheck, latency probe, reserve-validation button or validation queue.
+- Accept API-listed countries US, GB, CA, FR, DE, JP, IT and AT (Austria).
+- Keep unique endpoint allocation and fixed-proxy browser routing. Actual connection failures are handled when browsing; an unavailable endpoint never enables direct fallback.
+- Use four main sections: Browsers, Links, Proxies and Settings. Basic device presets and run controls remain prominent, with fewer settings and diagnostics kept out of the main workflow.
+- Preserve existing profiles and saved configuration on upgrade. Obsolete validation settings are removed without resetting the remaining saved values.
+- Keep Stop effective during a settings save, and handle connection failures caused by later page clicks as well as address-bar navigation.
+
+The app still provides 1–20 persistent Chromium sessions, URL distribution, approved QA stages, scheduling, Pause/Resume/Stop, profile cleanup and bounded renderer recovery. The Chromium engine and renderer sandbox remain enabled.
 
 ## Installation
 
-Download the x64 installer or portable ZIP and `SHA256SUMS.txt` from this release. Compare the downloaded file's SHA-256 hash before launching. The portable ZIP contains the full application directory; extract it before running `Unicorn.exe`.
+Download `Unicorn-Setup-v1.0.0-rc.2-x64.exe` or `Unicorn-Portable-v1.0.0-rc.2-x64.zip`, plus `SHA256SUMS.txt`. Verify the matching hash before launching. Extract the entire portable archive before opening `Unicorn.exe`.
 
-Windows 10/11 x64 is targeted. Start with 16 GB RAM, an SSD, and a modern 8-core processor for larger grids, and measure your own workload. The app embeds Chromium; it is not the separately installed Google Chrome product.
+Windows 10/11 x64 is targeted. For larger workloads, the documented starting reference is a modern 8-core CPU, 16 GB RAM and an SSD; it is not a measured universal minimum. An interactive Windows user session is required. The app embeds Chromium rather than an independently installed Google Chrome product.
 
-## Verification boundary
+## Verification
 
-Publication of these assets is gated by the exact commit's Windows Electron tests, installer/ZIP construction, packaged application launch, installed application launch, and asset checksums. Detailed logs and evidence are attached to the associated GitHub Actions run. Source-only checks do not count as Windows verification.
+Publication is gated by source checks, unit tests, real Electron tests on Windows, actual portable-ZIP extraction and launch, installer installation and launch, and SHA-256 verification at the exact release commit. The associated [Actions run](https://github.com/OxSagar/unicorn/actions) records the current test counts, package evidence and failures if any. Updated coverage includes direct allocation without diagnostics, API-country assignment, Austria, unique endpoints, real connection failures, settings migration and the simpler interface.
 
-The [recorded pre-merge candidate](https://github.com/OxSagar/unicorn/blob/main/docs/verification.md) passed 377 unit tests and all 55 native Windows tests without skips or test retries. It includes real 20-profile concurrency, three minute-interval scheduling cycles, six profile cleanup cases, eight intentional renderer crashes, a controlled STUN observation, and actual portable-archive/installed-app launch checks. The final release runs these gates again at its merged source commit. The complete [acceptance matrix](https://github.com/OxSagar/unicorn/blob/main/docs/acceptance.md) separates verified behavior from partial functionality and remaining tests.
+The [rc.1 verification record](https://github.com/OxSagar/unicorn/blob/main/docs/verification.md) remains historical. Its old validation behavior and measurements do not describe rc.2. See the current [acceptance matrix](https://github.com/OxSagar/unicorn/blob/main/docs/acceptance.md) for the revised scope.
 
-## Known limitations
+## Known limits
 
-- This is an evaluation release candidate, not a fully accepted production v1.0.0.
-- The pinned dependency audit has no high or critical findings and no production-package findings, but retains eight moderate build-tool findings associated with one formatter advisory. See [the dependency assessment](https://github.com/OxSagar/unicorn/blob/main/docs/dependency-audit.md) for the affected chain and remediation decision.
-- A 24-hour soak test, Windows 10/11 consumer hardware comparison, and independent packet-level DNS/WebRTC audit have not been completed for this candidate.
-- Public proxy availability and geography are not guaranteed. Sessions wait without connecting directly when validation cannot succeed.
-- Proxy enforcement is application-level. It is not an OS firewall. HTTP/HTTPS/WebSocket behavior is tested through controlled proxies; UDP-related features are restricted.
-- Browser site permissions are denied by default. Chrome account synchronization, Chrome extension-store integration, proprietary Chrome features, authenticated proxies, SOCKS4, automatic application updates, and a Windows background service are not provided.
-- Scheduled screenshots contain page pixels and may contain sensitive test data. They remain local and are subject to bounded retention. Console message contents are not collected by default.
-- The Windows installer is unsigned; the recorded Authenticode status is `NotSigned`. Windows may show SmartScreen or organizational policy warnings.
-
-No public live advertising destinations are used for automated acceptance tests. Configure approved domains and staging/test-ad environments before running QA.
+- This is an evaluation release candidate. The 24-hour soak, consumer Windows 10/11 benchmarks and independent packet-level leak audit remain incomplete.
+- Country and availability labels come from ProxyScrape. Unicorn no longer verifies actual exit geography or distinct public exit IPs, and a listed endpoint may fail on its first page request.
+- Public proxies may be unreliable or hostile; do not use sensitive credentials or valuable authenticated sessions through them.
+- Application-level routing controls are not an OS firewall. HTTPS certificate checks, authorized-domain restrictions and site restriction handling remain enabled.
+- Signing credentials have not been supplied. Treat the installer as unsigned and follow Windows or organizational application policies.
+- The pinned dependency tree retains the documented moderate build-tool findings; publication still requires passing audit gates. See the [dependency assessment](https://github.com/OxSagar/unicorn/blob/main/docs/dependency-audit.md).
+- Automatic updates, authenticated proxies, SOCKS4 and a Windows service are not provided. Custom device/timing/quota controls are no longer exposed in the simplified interface; existing stored values remain intact.

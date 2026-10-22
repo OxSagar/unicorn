@@ -144,12 +144,12 @@ test('an external-stage HTTP 403 cancels the actual restricted host and preserve
   expect(fixtures.proxies.slice(1).every((proxy) => proxy.requests + proxy.tunnels === 0)).toBe(true);
 });
 
-test('one cached proxy connection failure retries through one verified replacement and completes', async () => {
+test('one actual proxy connection failure retries through one directly assigned replacement and completes', async () => {
   harness = await launchUnicorn(fixtures, { proxyCount: 2, settings: { timings, retryLimit: 1 } });
   await invoke(harness, { type: 'navigate', id: 1, url: `${origin}/policy/warm` });
-  const validated = (await snapshot(harness)).browsers[0]?.proxy;
-  expect(validated?.id).toBe(fixtures.proxies[0]!.record.id);
-  expect(validated?.lastChecked).not.toBeNull();
+  const assigned = (await snapshot(harness)).browsers[0]?.proxy;
+  expect(assigned?.id).toBe(fixtures.proxies[0]!.record.id);
+  expect(assigned?.status).toBe('assigned');
   await invoke(harness, { type: 'browser', id: 1, action: 'stop' });
   await fixtures.proxies[0]!.stop();
   await invoke(harness, { type: 'distribute', urls: [`${origin}/policy/retry`], ids: [1], mode: 'same' });
@@ -161,4 +161,5 @@ test('one cached proxy connection failure retries through one verified replaceme
   expect(fixtures.proxies[1]!.requests + fixtures.proxies[1]!.tunnels).toBeGreaterThan(0);
   expect(fixtures.requests.filter((request) => request.path === '/policy/retry')).toHaveLength(1);
   expect(await browserEvaluate(harness, 1, 'window.policyReady')).toBe(true);
+  expect(fixtures.requests.filter((request) => request.path === '/diagnostic')).toEqual([]);
 });

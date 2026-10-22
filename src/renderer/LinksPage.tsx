@@ -58,7 +58,6 @@ export default function LinksPage({
   const [mode, setMode] = useState<DistributionMode>('round-robin');
   const [allowDuplicates, setAllowDuplicates] = useState(false);
   const [manual, setManual] = useState<Record<string, number>>({});
-  const [filter, setFilter] = useState('all');
   const [editing, setEditing] = useState<{ id: string; url: string; browserId: number } | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string>();
@@ -123,7 +122,11 @@ export default function LinksPage({
   );
   const duplicates = urls.length - new Set(urls).size;
   const invalid = urls.filter((raw) => !hasValidUrlSyntax(raw));
-  const queue = snapshot.jobs.filter((job) => filter === 'all' || job.status === filter);
+  const queue = snapshot.jobs.filter((job) => job.status === 'pending' || job.status === 'running');
+  const recent = snapshot.jobs
+    .filter((job) => !['pending', 'running'].includes(job.status))
+    .slice(-50)
+    .reverse();
   const canSaveEdit =
     editing &&
     hasValidUrlSyntax(editing.url.trim()) &&
@@ -165,9 +168,8 @@ export default function LinksPage({
   return (
     <div className="page-scroll">
       <SectionTitle
-        eyebrow="CENTRAL CONTROL"
-        title="Link distribution"
-        subtitle="Build a clear test queue, then send it to your browser profiles."
+        title="Links"
+        subtitle="Add your URLs, choose browsers, then review and start."
         actions={
           <Button
             icon="upload"
@@ -195,80 +197,61 @@ export default function LinksPage({
           <Button onClick={() => setPage('settings')}>Configure scope</Button>
         </div>
       )}
-      <div className="two-column link-composer">
-        <section className="surface">
-          <div className="surface-heading">
-            <h2>Test URLs</h2>
-            <Badge>{urls.length} URLs</Badge>
-          </div>
+      <section className="surface simple-link-composer">
+        <div>
           <Field
             label="One URL per line"
-            hint="Use full HTTPS addresses. Your original text is saved on this computer until you clear it."
+            hint="Full HTTPS addresses. Your input stays saved on this computer."
           >
             <textarea
               className="url-textarea"
               value={text}
-              onChange={(e) => updateText(e.target.value)}
+              onChange={(event) => updateText(event.target.value)}
               onBlur={() => persistDraft()}
-              placeholder={
-                'https://staging.example.com/\nhttps://staging.example.com/products\nhttps://staging.example.com/contact'
-              }
+              placeholder={'https://staging.example.com/\nhttps://staging.example.com/products'}
               spellCheck={false}
             />
           </Field>
           <div className="input-summary">
             <span>
-              {invalid.length ? (
-                <span className="text-danger">{invalid.length} invalid URLs</span>
-              ) : (
-                <span className="text-success">
-                  <Icon name="check" size={13} />{' '}
-                  {urls.length ? 'URL syntax looks valid' : 'Waiting for URLs'}
-                </span>
-              )}
+              {urls.length} URLs{duplicates > 0 ? ` · ${duplicates} duplicates` : ''}
             </span>
-            <span>{duplicates} duplicates</span>
             <Button
               variant="ghost"
+              disabled={!text && !draftError && !draftInputError}
               onClick={() => {
                 updateText('');
                 persistDraft();
               }}
-              disabled={!text && !draftError && !draftInputError}
             >
               Clear input
             </Button>
           </div>
           <div className="draft-status" role="status" aria-live="polite">
-            <span>
-              {draftSaved ? (text ? 'Draft saved locally' : 'No saved draft') : 'Draft not yet saved'}
-            </span>
-            <span>
-              {text.length.toLocaleString()} / {DRAFT_LIMIT.toLocaleString()} characters
-            </span>
+            {draftSaved ? (text ? 'Draft saved locally' : 'No saved draft') : 'Draft not yet saved'}
           </div>
           {(draftError || draftInputError) && (
             <p className="field-error" role="alert">
               {draftInputError || draftError}
             </p>
           )}
-          {invalid.length > 0 && <p className="field-error">Check: {invalid.slice(0, 2).join(', ')}</p>}
-          <label className="checkbox-line">
-            <input
-              type="checkbox"
-              checked={allowDuplicates}
-              onChange={(e) => setAllowDuplicates(e.target.checked)}
-            />
-            Allow duplicate pending test URLs
-          </label>
-          <h3 className="subheading">
-            Choose browsers <span>{selected.length} selected</span>
-          </h3>
+          {invalid.length > 0 && (
+            <p className="field-error">
+              Check {invalid.length} invalid URLs: {invalid.slice(0, 2).join(', ')}
+            </p>
+          )}
+        </div>
+        <div className="link-targets">
+          <div className="surface-heading">
+            <h2>Choose browsers</h2>
+            <Badge>{selected.length} selected</Badge>
+          </div>
           <div className="profile-picker">
             {snapshot.browsers.map((browser) => (
               <label className={selected.includes(browser.id) ? 'checked' : ''} key={browser.id}>
                 <input
                   type="checkbox"
+                  aria-label={`Assign to browser ${browser.id}`}
                   checked={selected.includes(browser.id)}
                   onChange={() => toggleBrowser(browser.id)}
                 />
@@ -277,32 +260,28 @@ export default function LinksPage({
               </label>
             ))}
           </div>
-          {!snapshot.browsers.length && (
-            <p className="muted">Create browser profiles from the top bar first.</p>
-          )}
-        </section>
-        <section className="surface">
-          <div className="surface-heading">
-            <h2>Distribution method</h2>
-            <Icon name="link" />
-          </div>
-          <div className="method-list">
-            {methods.map((method) => (
-              <label className={`method-option ${mode === method.id ? 'active' : ''}`} key={method.id}>
-                <input
-                  type="radio"
-                  name="method"
-                  value={method.id}
-                  checked={mode === method.id}
-                  onChange={() => setMode(method.id)}
-                />
-                <div>
-                  <strong>{method.title}</strong>
-                  <small>{method.text}</small>
-                </div>
-              </label>
-            ))}
-          </div>
+          {!snapshot.browsers.length && <p className="muted">Create browsers from the top bar first.</p>}
+          <p className="muted small-text">{methods.find((method) => method.id === mode)?.text}</p>
+          <details className="link-more-options">
+            <summary>More options</summary>
+            <Field label="Distribution method">
+              <select value={mode} onChange={(event) => setMode(event.target.value as DistributionMode)}>
+                {methods.map((method) => (
+                  <option key={method.id} value={method.id}>
+                    {method.title}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <label className="checkbox-line">
+              <input
+                type="checkbox"
+                checked={allowDuplicates}
+                onChange={(event) => setAllowDuplicates(event.target.checked)}
+              />
+              Allow duplicate pending URLs
+            </label>
+          </details>
           {mode === 'same' && urls.length > 1 && (
             <p className="field-error">Use exactly one URL for “Same URL to all”.</p>
           )}
@@ -314,7 +293,7 @@ export default function LinksPage({
                   <select
                     aria-label={`Assign URL ${index + 1}`}
                     value={manual[url] ?? selected[0] ?? ''}
-                    onChange={(e) => setManual({ ...manual, [url]: Number(e.target.value) })}
+                    onChange={(event) => setManual({ ...manual, [url]: Number(event.target.value) })}
                   >
                     {selected.map((id) => (
                       <option value={id} key={id}>
@@ -325,17 +304,13 @@ export default function LinksPage({
                 </label>
               ))}
               {urls.length > 100 && (
-                <p className="muted">
+                <p className="muted small-text">
                   The first 100 assignments are shown. Remaining URLs use the first selected browser.
                 </p>
               )}
             </div>
           )}
           <div className="distribution-footer">
-            <p>
-              <Icon name="info" size={15} />
-              Distribution prepares the queue. Start the test run when you’re ready.
-            </p>
             <Button
               icon="arrow"
               variant="primary"
@@ -350,27 +325,17 @@ export default function LinksPage({
             >
               Distribute {urls.length || ''} {urls.length === 1 ? 'URL' : 'URLs'}
             </Button>
+            <p>Links stay in the queue until you Start.</p>
           </div>
-        </section>
-      </div>
+        </div>
+      </section>
       <section className="surface queue-section">
         <div className="surface-heading">
           <div className="inline-heading">
-            <h2>Queue preview</h2>
+            <h2>Queue</h2>
             <Badge>{snapshot.jobs.filter((j) => j.status === 'pending').length} pending</Badge>
           </div>
           <div className="toolbar-actions">
-            <select
-              aria-label="Filter queue status"
-              disabled={busy || !!editing}
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-            >
-              <option value="all">All jobs</option>
-              {['pending', 'running', 'completed', 'failed', 'cancelled'].map((s) => (
-                <option key={s}>{s}</option>
-              ))}
-            </select>
             <Button
               variant="ghost"
               disabled={busy || !!editing}
@@ -403,8 +368,8 @@ export default function LinksPage({
           </p>
         )}
         {!queue.length ? (
-          <EmptyState icon="link" title="No test jobs here">
-            Add URLs and choose a distribution method to prepare your next run.
+          <EmptyState icon="link" title="No queued links">
+            Add URLs above, choose your browsers, and select Distribute.
           </EmptyState>
         ) : (
           <div className="table-scroll">
@@ -414,134 +379,161 @@ export default function LinksPage({
                   <th>Destination URL</th>
                   <th>Browser</th>
                   <th>Status</th>
-                  <th>Created</th>
                   <th />
                 </tr>
               </thead>
               <tbody>
-                {queue
-                  .slice(-200)
-                  .reverse()
-                  .map((job) => (
-                    <tr key={job.id} className={editing?.id === job.id ? 'queue-editing-row' : undefined}>
-                      <td
-                        className={editing?.id === job.id ? 'queue-edit-url' : 'url-cell'}
-                        title={job.error || job.url}
-                      >
-                        {editing?.id === job.id ? (
-                          <input
-                            aria-label="Edit destination URL"
-                            type="url"
-                            value={editing.url}
-                            onChange={(event) => setEditing({ ...editing, url: event.target.value })}
-                            onKeyDown={(event) => {
-                              if (event.key === 'Enter') {
-                                event.preventDefault();
-                                void saveEdit();
-                              }
-                              if (event.key === 'Escape' && !savingEdit) {
-                                setEditing(null);
-                                setEditError(undefined);
-                              }
-                            }}
-                            disabled={savingEdit}
-                            spellCheck={false}
-                            autoFocus
-                          />
-                        ) : (
-                          <>
-                            {job.url}
-                            {job.error && <small className="text-danger">{job.error}</small>}
-                          </>
-                        )}
-                      </td>
-                      <td>
-                        {editing?.id === job.id ? (
-                          <select
-                            aria-label="Edit assigned browser"
-                            value={editing.browserId}
-                            onChange={(event) =>
-                              setEditing({ ...editing, browserId: Number(event.target.value) })
+                {queue.slice(0, 200).map((job) => (
+                  <tr key={job.id} className={editing?.id === job.id ? 'queue-editing-row' : undefined}>
+                    <td
+                      className={editing?.id === job.id ? 'queue-edit-url' : 'url-cell'}
+                      title={job.error || job.url}
+                    >
+                      {editing?.id === job.id ? (
+                        <input
+                          aria-label="Edit destination URL"
+                          type="url"
+                          value={editing.url}
+                          onChange={(event) => setEditing({ ...editing, url: event.target.value })}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              event.preventDefault();
+                              void saveEdit();
                             }
-                            disabled={savingEdit}
-                          >
-                            {!snapshot.browsers.some((browser) => browser.id === editing.browserId) && (
-                              <option value={editing.browserId} disabled>
-                                Browser {editing.browserId} (closed)
-                              </option>
-                            )}
-                            {snapshot.browsers.map((browser) => (
-                              <option value={browser.id} key={browser.id}>
-                                Browser {browser.id}
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <span className="table-browser">{String(job.browserId).padStart(2, '0')}</span>
-                        )}
-                      </td>
-                      <td>
-                        <Status state={job.status} />
-                      </td>
-                      <td className="nowrap">{new Date(job.createdAt).toLocaleTimeString()}</td>
-                      <td>
-                        {job.status === 'pending' && (
-                          <div className="queue-row-actions">
-                            {editing?.id === job.id ? (
-                              <>
-                                <Button
-                                  variant="primary"
-                                  disabled={busy || savingEdit || !canSaveEdit}
-                                  onClick={() => void saveEdit()}
-                                >
-                                  {savingEdit ? 'Saving…' : 'Save'}
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  disabled={savingEdit}
-                                  onClick={() => {
-                                    setEditing(null);
-                                    setEditError(undefined);
-                                  }}
-                                >
-                                  Cancel
-                                </Button>
-                              </>
-                            ) : (
-                              <>
-                                <Button
-                                  disabled={busy || !!editing}
-                                  onClick={() => {
-                                    setEditError(undefined);
-                                    setEditing({ id: job.id, url: job.url, browserId: job.browserId });
-                                  }}
-                                >
-                                  Edit
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  disabled={busy || !!editing}
-                                  onClick={() => void run({ type: 'job', id: job.id, action: 'remove' })}
-                                >
-                                  Remove
-                                </Button>
-                              </>
-                            )}
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                            if (event.key === 'Escape' && !savingEdit) {
+                              setEditing(null);
+                              setEditError(undefined);
+                            }
+                          }}
+                          disabled={savingEdit}
+                          spellCheck={false}
+                          autoFocus
+                        />
+                      ) : (
+                        <>
+                          {job.url}
+                          {job.error && <small className="text-danger">{job.error}</small>}
+                        </>
+                      )}
+                    </td>
+                    <td>
+                      {editing?.id === job.id ? (
+                        <select
+                          aria-label="Edit assigned browser"
+                          value={editing.browserId}
+                          onChange={(event) =>
+                            setEditing({ ...editing, browserId: Number(event.target.value) })
+                          }
+                          disabled={savingEdit}
+                        >
+                          {!snapshot.browsers.some((browser) => browser.id === editing.browserId) && (
+                            <option value={editing.browserId} disabled>
+                              Browser {editing.browserId} (closed)
+                            </option>
+                          )}
+                          {snapshot.browsers.map((browser) => (
+                            <option value={browser.id} key={browser.id}>
+                              Browser {browser.id}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="table-browser">{String(job.browserId).padStart(2, '0')}</span>
+                      )}
+                    </td>
+                    <td>
+                      <Status state={job.status} />
+                    </td>
+                    <td>
+                      {job.status === 'pending' && (
+                        <div className="queue-row-actions">
+                          {editing?.id === job.id ? (
+                            <>
+                              <Button
+                                variant="primary"
+                                disabled={busy || savingEdit || !canSaveEdit}
+                                onClick={() => void saveEdit()}
+                              >
+                                {savingEdit ? 'Saving…' : 'Save'}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                disabled={savingEdit}
+                                onClick={() => {
+                                  setEditing(null);
+                                  setEditError(undefined);
+                                }}
+                              >
+                                Cancel
+                              </Button>
+                            </>
+                          ) : (
+                            <>
+                              <Button
+                                disabled={busy || !!editing}
+                                onClick={() => {
+                                  setEditError(undefined);
+                                  setEditing({ id: job.id, url: job.url, browserId: job.browserId });
+                                }}
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                disabled={busy || !!editing}
+                                onClick={() => void run({ type: 'job', id: job.id, action: 'remove' })}
+                              >
+                                Remove
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
             {queue.length > 200 && (
               <p className="table-note">
-                Showing the latest 200 matching records. Export results for the full retained history.
+                Showing the first 200 queued assignments. More appear as these finish or are removed.
               </p>
             )}
           </div>
         )}
       </section>
+      {recent.length > 0 && (
+        <details className="surface recent-results">
+          <summary>
+            Recent results <Badge>{recent.length}</Badge>
+          </summary>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>URL</th>
+                  <th>Browser</th>
+                  <th>Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recent.map((job) => (
+                  <tr key={job.id}>
+                    <td className="url-cell">
+                      {job.url}
+                      {job.error && <small className="text-danger">{job.error}</small>}
+                    </td>
+                    <td>Browser {job.browserId}</td>
+                    <td>
+                      <Status state={job.status} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
     </div>
   );
 }

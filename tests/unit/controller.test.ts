@@ -180,7 +180,6 @@ async function setup(data = state()) {
   const controller = new UnicornController(window, data, store, logs, {
     userData: store.directory,
     proxies: [],
-    diagnosticUrl: 'https://authorized.test/diagnostic',
   });
   controllers.add(controller);
   await controller.initialize();
@@ -412,6 +411,64 @@ describe('explicit queue runs and recurrence', () => {
     await restarted.controller.command({ type: 'global', action: 'start' });
     await vi.advanceTimersByTimeAsync(INTERVAL * 2);
     expect(restarted.urls()).toEqual([SECOND]);
+  });
+
+  it.each([
+    { label: 'global Stop', command: { type: 'global', action: 'stop' } },
+    { label: 'Clear pending', command: { type: 'clear-queue' } },
+  ] satisfies Array<{ label: string; command: AppCommand }>)(
+    'keeps recurrence off when $label arrives while an earlier settings Save awaits native cleanup',
+    async ({ command }) => {
+      const { controller, manager, assign, urls, saved } = await setup(state(1));
+      await assign(1, [FIRST]);
+      await controller.command({ type: 'global', action: 'start' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(urls()).toEqual([FIRST]);
+
+      const next = controller.snapshot().settings;
+      next.theme = 'light';
+      next.dailyRequestLimit = 4321;
+      next.schedule = { ...next.schedule, enabled: true, intervalMinutes: 3, startHour: 5, endHour: 21 };
+      const cleanup = deferred();
+      const stop = manager.stop.getMockImplementation()!;
+      manager.stop.mockImplementationOnce(async (id) => {
+        await cleanup.promise;
+        await stop(id);
+      });
+
+      const saving = controller.command({ type: 'settings', settings: next });
+      await controller.command(command);
+      expect(controller.snapshot().settings.schedule.enabled).toBe(false);
+      cleanup.resolve();
+      await saving;
+
+      expect(controller.snapshot().settings).toEqual({
+        ...next,
+        schedule: { ...next.schedule, enabled: false },
+      });
+      expect(controller.snapshot().scheduler).toEqual({ running: false, paused: false, nextRunAt: null });
+      await vi.advanceTimersByTimeAsync(INTERVAL * 4);
+      expect(urls()).toEqual([FIRST]);
+      expect(saved().settings).toEqual(controller.snapshot().settings);
+      expect(saved().scheduleTemplates).toEqual([]);
+      expect(saved().nextRunAt).toBeNull();
+    },
+  );
+
+  it('allows a new settings Save after Stop to deliberately enable recurrence again', async () => {
+    const { controller } = await setup(state(1));
+    await controller.command({ type: 'global', action: 'stop' });
+    const next = controller.snapshot().settings;
+    next.schedule = { ...next.schedule, enabled: true, intervalMinutes: 3 };
+
+    await controller.command({ type: 'settings', settings: next });
+
+    expect(controller.snapshot().settings.schedule).toEqual(next.schedule);
+    expect(controller.snapshot().scheduler).toEqual({
+      running: true,
+      paused: false,
+      nextRunAt: Date.now() + INTERVAL * 3,
+    });
   });
 });
 

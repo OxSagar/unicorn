@@ -12,7 +12,7 @@ All website permission checks and requests are denied, including microphone, cam
 
 ## Network controls
 
-Every browser partition starts with its request gate closed. No website navigation is permitted until the proxy pool has allocated a validated endpoint. Every assignment uses Chromium's fixed-server proxy mode with no `DIRECT` fallback and no ordinary bypass list. The `<-loopback>` rule removes Chromium's usual implicit direct connection to localhost, so even local integration fixtures must cross the configured proxy.
+Every browser partition starts with its request gate closed. No website navigation is permitted until the proxy pool has allocated an eligible API-listed endpoint and configured its fixed route. Every assignment uses Chromium's fixed-server proxy mode with no `DIRECT` fallback and no ordinary bypass list. The `<-loopback>` rule removes Chromium's usual implicit direct connection to localhost, so even local integration fixtures must cross the configured proxy.
 
 When a session stops, completes QA or loses its proxy, the gate blocks further requests before the fixed proxy is replaced with a loopback discard endpoint. Existing connections are closed. The gate remains installed after a browser view closes, preventing retained service workers from starting background requests. Profile storage is kept; closing a session does not silently remove registrations or cookies.
 
@@ -22,15 +22,15 @@ Proxy endpoints must be numeric IP addresses. Chromium host-resolver rules preve
 
 The ProxyScrape provider fetch is a deliberate Node control-plane connection and may use the machine's normal network route. It retrieves public proxy metadata and carries no website cookies. It is not a fallback path for a managed browser's page requests. The external release-page button similarly opens the user's normal system browser by explicit action.
 
-## Proxy validation and allocation
+## Direct proxy assignment
 
-The public provider is ProxyScrape. Automatic candidates are filtered to US, GB, CA, FR, DE, JP and IT. SOCKS4 is excluded because this implementation does not verify its DNS/privacy behavior. HTTP, HTTPS-to-proxy and SOCKS5 records are represented, but each candidate must pass the actual Chromium HTTPS request before use. Provider `ssl` support is not mislabeled as an HTTPS-encrypted connection to the proxy itself.
+The public provider is ProxyScrape. API country metadata is filtered to US, GB, CA, FR, DE, JP, IT and AT (Austria), alongside numeric-public-IP, port and supported-transport checks. The application assigns these endpoints directly. It performs no diagnostic network request, exit-IP lookup, independent geography check or measured-latency test. API metadata can be stale or incorrect, and an assigned endpoint can fail on its first real page request.
 
-Validation uses `https://ipwho.is/` through the candidate. The TLS certificate chain is checked normally. A valid observed public exit IP and a matching allowed country are required. Unknown-country, wrong-country, invalid-address and malformed responses fail closed. A bounded pool of four in-memory sessions limits validator resources. Healthy sessions are cleaned and returned to the pool after each attempt. A native proxy mutation or cleanup that remains unsettled retires that slot for the process lifetime, preventing late work from changing a reused validation route. Exhausting all four slots requires an application restart; ordinary abort-aware request timeouts can reuse a cleaned slot.
+The pool reserves endpoints synchronously, preventing two active browsers from racing for the same IP/port. Different endpoints may share an observed public exit; exit-IP uniqueness is no longer checked or advertised. Release/cancellation invalidates undelivered assignments, and provider refresh preserves active leases.
 
-The allocator reserves endpoints synchronously before awaiting validation, preventing two active browsers from racing for one endpoint. Duplicate observed exit IPs are also rejected when uniqueness is enabled. Failed candidates are quarantined. A stop invalidates a pending lease, so a late validation response cannot revive a cancelled run. Validation establishes a recent observation, not a guarantee that a public proxy will stay available or keep the same route indefinitely.
+Browser assignment still configures Chromium's fixed-server route with no DIRECT fallback, waits for native proxy-state reload, and requires the selected route to match the assigned protocol, IP and port exactly before opening the gate. Those local routing checks do not contact a diagnostic service. HTTPS destination certificates continue to be checked normally. Removing proxy preflight does not disable TLS verification.
 
-Recognized Chromium connection failures may trigger a bounded retry with a new eligible proxy. HTTP 401, 403 and 429 instead stop the test. Certificate errors, TLS policy failures, application deadlines and unrecognized errors do not trigger proxy rotation. TLS verification is never disabled to make a failing proxy pass. Public proxy coverage and availability are outside Unicorn's control; a waiting state is a valid outcome.
+Recognized failures during actual browser connections release and temporarily quarantine the endpoint. QA retries remain bounded. HTTP 401, 403 and 429, challenges, certificate failures, application deadlines and unrecognized errors stop the relevant work rather than triggering rotation around restrictions. Public proxy coverage and availability remain outside Unicorn's control.
 
 ## Scope and rate controls
 
@@ -54,7 +54,7 @@ QA screenshots deliberately capture the visible test page. They can contain page
 
 ## Test hooks and release constraints
 
-Fixture configuration and the main-process test accessor require both an unpackaged application and an explicit E2E environment flag. A packaged installation does not expose that fixture path. The test mechanism can supply controlled proxies and a local diagnostic endpoint; it must not be confused with verification of public proxy quality or geolocation.
+Fixture configuration and the main-process test accessor require both an unpackaged application and an explicit E2E environment flag. A packaged installation does not expose that fixture path. The test mechanism can supply controlled proxies. Tests record that browser assignment performs no diagnostic requests; fixtures must not be confused with evidence of public proxy quality or geolocation.
 
 The application has no automatic self-updater in this version. Updates are obtained from the project's release page and installed manually. Do not assume an unsigned executable is signed, and do not disable system protections to suppress an installation warning. Release notes identify signing and verification status.
 
@@ -67,7 +67,6 @@ Security tests and build audits reduce risk but do not prove the absence of all 
 - [Electron WebRTC IP handling policy](https://www.electronjs.org/docs/latest/api/web-contents#contentssetwebrtciphandlingpolicypolicy)
 - [Chromium proxy networking](https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/proxy.md)
 - [ProxyScrape free proxy API](https://docs.proxyscrape.com/api-reference/public-api/get-proxy-list)
-- [IPWho.is API and limits](https://ipwhois.io/documentation)
 - [Google reCAPTCHA widget markup](https://developers.google.com/recaptcha/docs/display)
 - [hCaptcha widget configuration](https://docs.hcaptcha.com/configuration)
 - [Cloudflare Turnstile widget markup](https://developers.cloudflare.com/turnstile/get-started/client-side-rendering/)

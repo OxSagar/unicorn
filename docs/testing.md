@@ -11,7 +11,7 @@ npm test
 npm run build
 ```
 
-Unit suites cover proxy JSON parsing, all seven eligible countries, invalid/nonpublic endpoints, endpoint and exit-IP collisions, concurrent reservations, cancellation, country mismatch, provider metadata, domain boundaries, URL schemes, distribution, import, budgets, device/settings/IPC validation, lifecycle transitions, pause-aware time, synthetic asset restrictions, and proxy configuration races.
+Unit suites cover proxy JSON parsing, all eight eligible countries including Austria, invalid/nonpublic endpoints, endpoint collisions, direct concurrent reservations, cancellation, provider metadata, domain boundaries, URL schemes, distribution, import, budgets, device/settings/IPC validation, lifecycle transitions, pause-aware time, synthetic asset restrictions, and proxy configuration races.
 
 ## Real Electron tests on Windows
 
@@ -55,7 +55,7 @@ try {
 
 Only `fixture.cer` is trusted. **Never import `untrusted.pem` or a certificate derived from it**; that separate fixture must remain untrusted so TLS-refusal tests remain meaningful. Certificates and private fixture keys are generated under the ignored `tmp/test-certificates` directory, outside the test-output directory that Playwright clears at startup and are never committed or bundled. The tests do not use `ignoreHTTPSErrors`, disable certificate verification, or disable the Windows sandbox. Microsoft documents the machine-store default and `-addstore` operation in the [certutil reference](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/certutil).
 
-The suite exercises JavaScript, Fetch, cookies, local storage, IndexedDB, cache, service workers, profile separation/restart, mobile/tablet emulation, controlled popups, QA navigation stages, 1/5/10/15/20 live sessions, every selectable count, wrong-country proxies, timeouts, empty pool, dropped proxies, certificate rejection, forbidden destinations, HTTP 403/429, cancellation, pause/resume, and renderer recovery. UI tests use the shipped renderer controls and native view bounds.
+The suite exercises JavaScript, Fetch, cookies, local storage, IndexedDB, cache, service workers, profile separation/restart, mobile/tablet emulation, controlled popups, QA navigation stages, 1/5/10/15/20 live sessions, every selectable count, API-country assignment without diagnostics, Austria, timeouts, empty pool, dropped proxies, certificate rejection, forbidden destinations, HTTP 403/429, cancellation, pause/resume, and renderer recovery. UI tests use the shipped four-section interface and native view bounds. They cover preset controls and preservation of saved advanced settings when editing the simplified settings. Proxy tests distinguish schema/country filtering from removed network preflight and verify zero diagnostic requests.
 
 ## CI and publishing
 

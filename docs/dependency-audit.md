@@ -2,6 +2,8 @@
 
 Assessment date: **22 October 2026**. This records the dependency tree pinned in `package-lock.json` for Unicorn `1.0.0-rc.1`; it is not a claim that future installs or releases have the same findings.
 
+Version rc.2 preserves this dependency tree; only the application version changes in the manifest/lockfile. Its release workflow reruns both audit gates. The dated findings below remain the original assessment, not a substitute for that current run.
+
 ## Results and release implications
 
 The complete dependency audit reports **eight moderate findings**, with no high or critical findings. They arise from one advisory and its affected build-tool dependency chain. The CI gate at `--audit-level=high` passes while these moderate findings remain. A separate successful `npm audit --omit=dev --json` run reports **zero findings** for the production dependency tree.

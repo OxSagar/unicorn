@@ -17,7 +17,6 @@ import { assertApproved, DomainBudget } from './core/scope';
 import { distribute, importUrls } from './core/distribution';
 import { inOperatingWindow } from './core/timing';
 import { validateSettings } from './core/validation';
-import { validateProxy } from './network/proxy-validator';
 import { SiteRestrictionError } from './network/site-restriction';
 import { withDeadline } from './browser/deadline';
 import { ActivityLog, LocalStore, type StoredData } from './storage';
@@ -26,7 +25,6 @@ export interface TestConfiguration {
   userData: string;
   settings?: Partial<AppSettings>;
   proxies: ProxyRecord[];
-  diagnosticUrl: string;
 }
 export class UnicornController {
   readonly manager: BrowserManager;
@@ -39,6 +37,7 @@ export class UnicornController {
   private pausedIds = new Set<number>();
   private paused = false;
   private scheduleArmed = false;
+  private scheduleCancellationGeneration = 0;
   private closing = false;
   private sendTimer?: ReturnType<typeof setTimeout>;
   private saveTimer?: ReturnType<typeof setTimeout>;
@@ -49,7 +48,6 @@ export class UnicornController {
   private lastResourceWarning = 0;
   private lastHeartbeatMonotonicMs?: number;
   private lastHeartbeatLogMonotonicMs?: number;
-  private poolOptions = { uniqueExitIps: true, validationTtlMs: 30000, maxAttempts: 6 };
   private provider: AppSnapshot['provider'] = {
     lastFetchedAt: null,
     retrieved: 0,
@@ -79,23 +77,16 @@ export class UnicornController {
     this.budget = new DomainBudget(data.budget);
     this.requestBudget = new DomainBudget(data.requestBudget);
     this.scheduleArmed = data.settings.schedule.enabled && data.settings.schedule.resumeAfterRestart;
-    this.poolOptions.uniqueExitIps = data.settings.uniqueExitIps;
-    this.pool = new ProxyPool(
-      (record, signal) =>
-        validateProxy(record, this.data.settings.proxyTimeoutMs, signal, test?.diagnosticUrl),
-      this.poolOptions,
-    );
+    this.pool = new ProxyPool();
     this.manager = new BrowserManager({
       window,
       settings: () => this.data.settings,
       proxies: {
         acquire: async (id, signal) => {
+          signal?.throwIfAborted();
           const reserve = this.pool
             .list()
-            .filter(
-              (record) =>
-                record.assignedTo === undefined && ['available', 'unverified'].includes(record.status),
-            ).length;
+            .filter((record) => record.assignedTo === undefined && record.status === 'available').length;
           if (!reserve && !this.pool.assigned(id)) await withDeadline(this.replenishProxies(), 20000, signal);
           else if (reserve < Math.max(4, this.data.settings.browserCount)) void this.replenishProxies();
           return this.pool.acquire(id, signal);
@@ -303,7 +294,7 @@ export class UnicornController {
       );
       try {
         const response = await withDeadline(
-          fetch(proxyScrapeUrl({ timeoutMs: this.data.settings.proxyTimeoutMs, limit: 2000 }), {
+          fetch(proxyScrapeUrl({ limit: 2000 }), {
             signal: request.signal,
             headers: { Accept: 'application/json', 'User-Agent': 'Unicorn-QA/1.0' },
             redirect: 'error',
@@ -351,7 +342,7 @@ export class UnicornController {
         this.logs.add(
           'info',
           'proxy',
-          `ProxyScrape supplied ${parsed.retrieved} records; ${parsed.records.length} eligible endpoints retained. Exit country and HTTPS validation happen before allocation.`,
+          `ProxyScrape supplied ${parsed.retrieved} records; ${parsed.records.length} endpoints retained by API-reported country and available for direct assignment.`,
         );
       } catch (error) {
         this.provider.error = String(error);
@@ -499,12 +490,8 @@ export class UnicornController {
     if (
       !this.test &&
       (Date.now() - (this.provider.lastFetchedAt ?? 0) > this.data.settings.proxyRefreshMinutes * 60000 ||
-        this.pool
-          .list()
-          .filter(
-            (record) =>
-              record.assignedTo === undefined && ['available', 'unverified'].includes(record.status),
-          ).length < Math.max(4, this.data.settings.browserCount))
+        this.pool.list().filter((record) => record.assignedTo === undefined && record.status === 'available')
+          .length < Math.max(4, this.data.settings.browserCount))
     )
       void this.replenishProxies();
     if (!this.scheduleArmed || this.active.size || !this.data.nextRunAt || Date.now() < this.data.nextRunAt)
@@ -640,6 +627,7 @@ export class UnicornController {
           const reviewed = this.reviewedPending(pendingIds);
           if (reviewed.size) this.begin(pendingIds, false, reviewed);
         } else {
+          this.scheduleCancellationGeneration++;
           this.scheduleArmed = false;
           this.data.settings.schedule.enabled = false;
           this.data.scheduleTemplates = [];
@@ -727,6 +715,7 @@ export class UnicornController {
         this.data.jobs = this.data.jobs.filter((job) => job.id !== command.id || job.status === 'running');
         break;
       case 'clear-queue':
+        this.scheduleCancellationGeneration++;
         this.data.jobs = this.data.jobs.filter((job) => job.status !== 'pending');
         this.data.scheduleTemplates = [];
         this.scheduleArmed = false;
@@ -736,8 +725,11 @@ export class UnicornController {
       case 'settings': {
         const next = validateSettings(command.settings);
         if (this.active.size) throw new Error('Stop active QA jobs before changing test settings.');
+        const cancellationGeneration = this.scheduleCancellationGeneration;
         await Promise.all(this.manager.snapshots().map((item) => this.manager.stop(item.id)));
-        this.poolOptions.uniqueExitIps = next.uniqueExitIps;
+        // A later Stop or Clear pending must win over this earlier Save while
+        // native cleanup is pending. Preserve every other edited preference.
+        if (cancellationGeneration !== this.scheduleCancellationGeneration) next.schedule.enabled = false;
         this.data.settings = next;
         this.cancelBrowserQueue(
           this.manager
@@ -767,17 +759,6 @@ export class UnicornController {
       case 'refresh-proxies':
         await this.refreshProxies();
         break;
-      case 'validate-proxies': {
-        void this.pool
-          .validateAvailable(4)
-          .then((records) => {
-            this.logs.add('info', 'proxy', `${records.length} reserve proxies passed validation.`);
-            this.changed();
-          })
-          .catch((error) => this.logs.add('warn', 'proxy', String(error)));
-        message = 'Validating up to four reserve proxies. Results will appear in the proxy pool.';
-        break;
-      }
       case 'profile':
         if (command.action !== 'storage') this.stopped.add(command.id);
         storageBytes = await this.manager.profile(command.id, command.action);

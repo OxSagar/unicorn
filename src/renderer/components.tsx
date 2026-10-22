@@ -227,9 +227,9 @@ export function Status({ state }: { state: string }) {
     ? 'good'
     : ['ERROR', 'PROXY_FAILED', 'failed'].includes(state)
       ? 'bad'
-      : ['PAUSED', 'WAITING_FOR_PROXY', 'RETRY_WAIT', 'unverified'].includes(state)
+      : ['PAUSED', 'WAITING_FOR_PROXY', 'RETRY_WAIT'].includes(state)
         ? 'warn'
-        : ['NAVIGATING', 'VALIDATING_PROXY', 'assigned', 'validating', 'running'].includes(state)
+        : ['NAVIGATING', 'ASSIGNING_PROXY', 'assigned', 'running'].includes(state)
           ? 'accent'
           : 'neutral';
   return (

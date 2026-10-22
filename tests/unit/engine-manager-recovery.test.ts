@@ -45,8 +45,6 @@ const proxy: ProxyRecord = {
   countryName: 'United States',
   source: 'proxyscrape',
   status: 'assigned',
-  lastChecked: 1,
-  latencyMs: 1,
   failures: 0,
 };
 let nextId = 0;
@@ -73,6 +71,7 @@ class GateDouble {
     signal.throwIfAborted();
     if (this.session.poisoned) throw new Error('Session is poisoned; restart Unicorn');
     this.isEnabled = true;
+    return `PROXY ${_proxy.ip}:${_proxy.port}`;
   });
   readonly dispose = vi.fn(() => {
     this.isEnabled = false;
@@ -201,6 +200,106 @@ afterEach(async () => {
   managers.clear();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('direct endpoint assignment failures', () => {
+  it.each(['manual', 'QA'] as const)(
+    'releases a terminal %s transport failure into endpoint cooldown with retries disabled',
+    async (mode) => {
+      const { manager, first, acquire, release, session } = await setup(0);
+      const failure = Object.assign(new Error('ERR_PROXY_CONNECTION_FAILED while loading the page'), {
+        code: 'ERR_PROXY_CONNECTION_FAILED',
+      });
+      first.loadURL.mockRejectedValueOnce(failure);
+      const run = mode === 'manual' ? manager.navigate(1, target) : manager.runQa(1, target);
+      await expect(run).rejects.toBe(failure);
+      expect(acquire).toHaveBeenCalledTimes(1);
+      expect(release.mock.calls.filter((call) => call[1] !== undefined)).toEqual([[1, failure.message]]);
+      expect(session.gate?.isEnabled).toBe(false);
+      expect(manager.snapshots()[0]).toMatchObject({ state: 'ERROR', lastError: failure.message });
+      expect(manager.snapshots()[0].proxy).toBeUndefined();
+    },
+  );
+
+  it.each(['ERR_CERT_AUTHORITY_INVALID', 'ERR_BLOCKED_BY_CLIENT', 'ERR_ABORTED'])(
+    'does not quarantine an endpoint for a non-transport page failure: %s',
+    async (code) => {
+      const { manager, first, release } = await setup(0);
+      const failure = Object.assign(new Error(`${code} while loading the page`), { code });
+      first.loadURL.mockRejectedValueOnce(failure);
+      await expect(manager.navigate(1, target)).rejects.toBe(failure);
+      expect(release.mock.calls.every((call) => call[1] === undefined)).toBe(true);
+      expect(manager.snapshots()[0].proxy).toBeUndefined();
+    },
+  );
+
+  it('retires an idle manual main-frame transport failure once without allocating a replacement', async () => {
+    const { manager, first, acquire, release, session } = await setup();
+    await manager.navigate(1, target);
+    release.mockClear();
+    session.gate!.hooks.onFailure('net::ERR_PROXY_CONNECTION_FAILED', true, first.id);
+    expect(session.gate?.isEnabled).toBe(false);
+    expect(manager.snapshots()[0]).toMatchObject({ state: 'ERROR', stage: 'Navigation failed' });
+    session.gate!.hooks.onFailure('net::ERR_PROXY_CONNECTION_FAILED', true, first.id);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(release.mock.calls).toEqual([[1, 'net::ERR_PROXY_CONNECTION_FAILED']]);
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(manager.snapshots()[0].proxy).toBeUndefined();
+  });
+
+  it.each(['subresource', 'other view', 'certificate', 'abort'] as const)(
+    'does not retire the parent lease for an idle %s error',
+    async (kind) => {
+      const { manager, first, release, session } = await setup();
+      await manager.navigate(1, target);
+      release.mockClear();
+      const message =
+        kind === 'certificate'
+          ? 'net::ERR_CERT_AUTHORITY_INVALID'
+          : kind === 'abort'
+            ? 'net::ERR_ABORTED'
+            : 'net::ERR_PROXY_CONNECTION_FAILED';
+      session.gate!.hooks.onFailure(
+        message,
+        kind !== 'subresource',
+        kind === 'other view' ? first.id + 1 : first.id,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(release).not.toHaveBeenCalled();
+      expect(session.gate?.isEnabled).toBe(true);
+      expect(manager.snapshots()[0].state).toBe('RUNNING');
+    },
+  );
+
+  it.each(['replacement', 'stop'] as const)(
+    'finishes idle failure cleanup before a concurrent %s can reuse its lease',
+    async (action) => {
+      const { manager, first, acquire, release, session } = await setup();
+      await manager.navigate(1, target);
+      release.mockClear();
+      let cleanupFinished!: () => void;
+      session.gate!.block.mockImplementationOnce(() => {
+        session.gate!.isEnabled = false;
+        return new Promise<void>((resolve) => {
+          cleanupFinished = resolve;
+        });
+      });
+      session.gate!.hooks.onFailure('net::ERR_PROXY_CONNECTION_FAILED', true, first.id);
+      const next = action === 'replacement' ? manager.navigate(1, replacement) : manager.stop(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(acquire).toHaveBeenCalledTimes(1);
+      expect(first.loadURL).not.toHaveBeenCalledWith(replacement);
+      cleanupFinished();
+      await next;
+      expect(release.mock.calls.filter((call) => call[1] !== undefined)).toEqual([
+        [1, 'net::ERR_PROXY_CONNECTION_FAILED'],
+      ]);
+      expect(manager.snapshots()[0].state).toBe(action === 'replacement' ? 'RUNNING' : 'STOPPED');
+      expect(session.gate?.isEnabled).toBe(action === 'replacement');
+      expect(acquire).toHaveBeenCalledTimes(action === 'replacement' ? 2 : 1);
+      expect(Boolean(manager.snapshots()[0].proxy)).toBe(action === 'replacement');
+    },
+  );
 });
 
 describe('manager renderer recovery lifetime', () => {

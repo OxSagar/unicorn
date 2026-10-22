@@ -1,12 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import {
-  isPublicIp,
-  parseProxyScrape,
-  ProxyPool,
-  proxyScrapeUrl,
-  type ProxyValidation,
-} from '../../src/main/core/proxy';
-import type { ProxyRecord } from '../../src/shared/types';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { isPublicIp, parseProxyScrape, ProxyPool, proxyScrapeUrl } from '../../src/main/core/proxy';
+import { COUNTRIES, type ProxyRecord } from '../../src/shared/types';
 
 function record(index = 1): ProxyRecord {
   return {
@@ -16,81 +10,91 @@ function record(index = 1): ProxyRecord {
     protocol: 'http',
     country: 'US',
     countryName: 'United States',
-    status: 'unverified',
-    lastChecked: null,
-    latencyMs: null,
+    status: 'available',
     failures: 0,
     source: 'proxyscrape',
   };
 }
-const deferred = <T>() => {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: Error) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { resolve, reject, promise };
-};
-const valid = (proxy: ProxyRecord): ProxyValidation => ({
-  country: proxy.country,
-  exitIp: proxy.ip,
-  latencyMs: 12,
-});
+afterEach(() => vi.unstubAllGlobals());
 
-describe('ProxyScrape contract and filtering', () => {
-  it('uses the provider updater JSON contract and the seven ISO countries', () => {
+describe('ProxyScrape country metadata and endpoint parsing', () => {
+  it('requests the JSON contract and all eight ISO countries, including Austria', () => {
     const url = new URL(proxyScrapeUrl());
     expect(url.origin + url.pathname).toBe('https://api.proxyscrape.com/v4/free-proxy-list/get');
     expect(url.searchParams.get('request')).toBe('get_proxies');
-    expect(url.searchParams.get('country')).toBe('US,GB,CA,FR,DE,JP,IT');
+    expect(url.searchParams.get('country')).toBe('US,GB,CA,FR,DE,JP,IT,AT');
     expect(url.searchParams.get('protocol')).toBe('http,socks5');
     expect(url.searchParams.get('format')).toBe('json');
+    expect(url.searchParams.has('timeout')).toBe(false);
   });
-  it('parses actual live v4 metadata and never considers it locally validated', () => {
+
+  it('marks eligible API records available without copying provider health or observed-exit fields', () => {
     const result = parseProxyScrape({
       proxies: [
-        { ip: '8.8.8.8', port: 80, protocol: 'http', ssl: true, alive: true, ip_data: { countryCode: 'US' } },
+        {
+          ip: '8.8.8.8',
+          port: 80,
+          protocol: 'http',
+          alive: false,
+          ssl: false,
+          ip_data: { countryCode: 'AT' },
+          exitIp: '9.9.9.9',
+          latencyMs: 5,
+          lastChecked: 42,
+        },
       ],
       nextpage: true,
     });
-    expect(result.records[0]).toMatchObject({
-      protocol: 'http',
-      country: 'US',
-      status: 'unverified',
-      lastChecked: null,
-    });
+    expect(result.records).toEqual([
+      {
+        id: 'http://8.8.8.8:80',
+        ip: '8.8.8.8',
+        port: 80,
+        protocol: 'http',
+        country: 'AT',
+        countryName: 'Austria',
+        status: 'available',
+        failures: 0,
+        source: 'proxyscrape',
+      },
+    ]);
     expect(result.nextPage).toBe(true);
   });
-  it('handles the official flat mirror and lowercase ISO codes', () => {
-    expect(
-      parseProxyScrape([{ ip: '8.8.4.4', port: '1080', protocol: 'socks5', country_code: 'gb' }]).records[0]
-        ?.country,
-    ).toBe('GB');
+
+  it.each(COUNTRIES)('accepts API-reported %s in either documented country shape', (country) => {
+    const result = parseProxyScrape([
+      { ip: '8.8.8.8', port: '1080', protocol: 'socks5', country_code: country.toLowerCase() },
+      { ip: '8.8.4.4', port: 8080, protocol: 'http', ip_data: { countryCode: country } },
+    ]);
+    expect(result.records.map((proxy) => proxy.country)).toEqual([country, country]);
   });
-  it('rejects wrong countries, UK, absent geography, SOCKS4, dead endpoints and malformed ports', () => {
+
+  it('rejects wrong countries, UK, absent geography, SOCKS4 and malformed ports', () => {
     const base = { ip: '8.8.8.8', port: 8080, protocol: 'http', country_code: 'US' };
     const rows = [
-      { ...base, country_code: 'CN' },
+      { ...base, country_code: 'AU' },
       { ...base, country_code: 'UK' },
       { ...base, country_code: undefined },
       { ...base, protocol: 'socks4' },
-      { ...base, alive: false },
       { ...base, port: 65536 },
       { ...base, port: 1.5 },
       { ...base, port: '80x' },
     ];
-    expect(parseProxyScrape(rows)).toMatchObject({ records: [], retrieved: 8, rejected: 8 });
+    expect(parseProxyScrape(rows)).toMatchObject({ records: [], retrieved: 7, rejected: 7 });
   });
-  it('deduplicates endpoints even when a second protocol is advertised', () => {
-    const base = { ip: '8.8.8.8', port: 8080, country_code: 'US' };
-    expect(
-      parseProxyScrape([
-        { ...base, protocol: 'http' },
-        { ...base, protocol: 'socks5' },
-      ]).records,
-    ).toHaveLength(1);
+
+  it('deduplicates numeric endpoints across protocol and equivalent IPv6 spelling', () => {
+    const base = { port: 8080, country_code: 'US' };
+    const result = parseProxyScrape([
+      { ...base, ip: '8.8.8.8', protocol: 'http' },
+      { ...base, ip: '8.8.8.8', protocol: 'socks5' },
+      { ...base, ip: '2606:4700:4700::1111', protocol: 'socks5' },
+      { ...base, ip: '2606:4700:4700:0000:0000:0000:0000:1111', protocol: 'http' },
+    ]);
+    expect(result.records).toHaveLength(2);
+    expect(result.records[1]?.id).toBe('socks5://[2606:4700:4700::1111]:8080');
   });
+
   it.each([
     '127.0.0.1',
     '10.1.1.1',
@@ -102,146 +106,224 @@ describe('ProxyScrape contract and filtering', () => {
     '::1',
     'fe80::1',
     '::ffff:127.0.0.1',
+    '2001:0DB8::1',
+    '2001:0000::1',
     'bad.example',
   ])('rejects nonpublic proxy %s', (ip) => expect(isPublicIp(ip)).toBe(false));
+
   it.each([null, '1.2.3.4:80', { proxies: {} }, { error: 'rate limited' }])(
     'rejects malformed provider bodies',
     (value) => expect(() => parseProxyScrape(value)).toThrow(),
   );
 });
 
-describe('atomic proxy leases', () => {
-  it('reserves synchronously across concurrent requests', async () => {
-    const gate = deferred<ProxyValidation>();
-    const pool = new ProxyPool(() => gate.promise);
+describe('direct atomic endpoint leases', () => {
+  it('reserves synchronously before promise delivery without making a network request', async () => {
+    const fetch = vi.fn(() => {
+      throw new Error('Allocation must not contact a diagnostic service');
+    });
+    vi.stubGlobal('fetch', fetch);
+    const pool = new ProxyPool();
     pool.merge([record()]);
     const first = pool.acquire(1);
+    expect(pool.assigned(1)).toMatchObject({ status: 'assigned', assignedTo: 1 });
     const second = pool.acquire(2);
     expect(await second).toBeNull();
-    gate.resolve(valid(record()));
-    expect((await first)?.assignedTo).toBe(1);
+    expect(await first).toMatchObject({ country: 'US', assignedTo: 1 });
+    expect(fetch).not.toHaveBeenCalled();
   });
-  it('deduplicates simultaneous acquisition for the same browser', async () => {
-    const gate = deferred<ProxyValidation>();
-    const pool = new ProxyPool(() => gate.promise);
+
+  it('atomically serves twenty profiles even when each issues five concurrent requests', async () => {
+    const pool = new ProxyPool();
+    pool.merge(Array.from({ length: 20 }, (_, index) => record(index + 1)));
+    const requests = Array.from({ length: 100 }, (_, index) => pool.acquire((index % 20) + 1));
+    expect(pool.list().filter((proxy) => proxy.status === 'assigned')).toHaveLength(20);
+    const results = await Promise.all(requests);
+    expect(new Set(results.map((proxy) => proxy?.id)).size).toBe(20);
+    for (let id = 1; id <= 20; id++) expect(pool.assigned(id)?.assignedTo).toBe(id);
+  });
+
+  it('coalesces same-browser acquisition and keeps its lease on a later acquisition', async () => {
+    const pool = new ProxyPool();
+    pool.merge([record(), record(2)]);
+    const first = pool.acquire(1);
+    expect(pool.acquire(1)).toBe(first);
+    const assigned = await first;
+    expect(await pool.acquire(1)).toEqual(assigned);
+    expect(pool.list().filter((proxy) => proxy.status === 'assigned')).toHaveLength(1);
+  });
+
+  it('allows different ports on the same IP without an observed-exit uniqueness check', async () => {
+    const pool = new ProxyPool();
+    pool.merge([record(), { ...record(), port: 8081 }]);
+    const leases = await Promise.all([pool.acquire(1), pool.acquire(2)]);
+    expect(leases.map((lease) => lease?.port)).toEqual([8080, 8081]);
+    expect(leases.every((lease) => lease && !('exitIp' in lease))).toBe(true);
+  });
+
+  it('does not trust duplicate record IDs, protocol aliases, assignment flags, or stale health metadata', async () => {
+    const pool = new ProxyPool();
+    const untrusted = {
+      ...record(),
+      id: 'forged',
+      status: 'assigned',
+      assignedTo: 19,
+      failures: 999,
+      countryName: 'Forged label',
+      exitIp: '9.9.9.9',
+      lastChecked: 100,
+      latencyMs: 1,
+    };
+    pool.merge([untrusted as ProxyRecord, { ...record(), protocol: 'socks5', id: 'second' }]);
+    expect(pool.list()).toHaveLength(1);
+    expect(pool.list()[0]).toMatchObject({
+      id: record().id,
+      status: 'available',
+      failures: 0,
+      countryName: 'United States',
+    });
+    expect(pool.list()[0]).not.toHaveProperty('assignedTo');
+    for (const key of ['exitIp', 'lastChecked', 'latencyMs']) expect(pool.list()[0]).not.toHaveProperty(key);
+    expect(await pool.acquire(1)).not.toBeNull();
+    expect(await pool.acquire(2)).toBeNull();
+  });
+
+  it('rejects malformed and nonpublic production records while permitting explicit loopback fixtures', () => {
+    const pool = new ProxyPool();
+    pool.merge([
+      null,
+      {},
+      { ...record(), ip: '127.0.0.1' },
+      { ...record(), port: -1 },
+      { ...record(), country: 'AU' },
+      { ...record(), protocol: 'socks4' },
+      { ...record(), source: 'other' },
+    ] as unknown as ProxyRecord[]);
+    expect(pool.list()).toEqual([]);
+    pool.merge([{ ...record(), ip: '127.0.0.1', source: 'fixture', country: 'AT' }]);
+    expect(pool.list()[0]).toMatchObject({
+      id: 'http://127.0.0.1:8080',
+      country: 'AT',
+      countryName: 'Austria',
+    });
+  });
+
+  it.each([0, 21, -1, 1.5, Number.NaN])('rejects browser ID %s without reserving an endpoint', async (id) => {
+    const pool = new ProxyPool();
     pool.merge([record()]);
-    const one = pool.acquire(1);
-    const again = pool.acquire(1);
-    expect(one).toBe(again);
-    gate.resolve(valid(record()));
-    await one;
-    expect(pool.assigned(1)?.id).toBe(record().id);
+    await expect(pool.acquire(id)).rejects.toThrow('Invalid browser ID');
+    expect(pool.list()[0]?.status).toBe('available');
   });
-  it('rejects duplicate exit IPs even when endpoints differ', async () => {
-    const pool = new ProxyPool(async () => ({ exitIp: '9.9.9.9', country: 'US', latencyMs: 5 }));
-    pool.merge([record(1), record(2)]);
-    const results = await Promise.all([pool.acquire(1), pool.acquire(2)]);
-    expect(results.filter(Boolean)).toHaveLength(1);
-    expect(pool.list().filter((item) => item.status === 'assigned')).toHaveLength(1);
-  });
-  it('rejects an observed wrong-country exit', async () => {
-    const pool = new ProxyPool(async () => ({ exitIp: '9.9.9.9', country: 'DE', latencyMs: 5 }));
+
+  it('rejects an already-aborted request without taking a lease', async () => {
+    const pool = new ProxyPool();
     pool.merge([record()]);
-    expect(await pool.acquire(1)).toBeNull();
-    expect(pool.list()[0]?.error).toMatch(/country/);
+    const abort = new AbortController();
+    abort.abort(new Error('Stopped'));
+    await expect(pool.acquire(1, abort.signal)).rejects.toThrow('Stopped');
+    expect(pool.assigned(1)).toBeUndefined();
   });
-  it('rejects invalid validation output', async () => {
-    const pool = new ProxyPool(async () => ({ exitIp: '127.0.0.1', country: 'US', latencyMs: 1 }));
+
+  it('releases a same-turn cancelled acquisition without quarantining the endpoint', async () => {
+    const pool = new ProxyPool();
     pool.merge([record()]);
-    expect(await pool.acquire(1)).toBeNull();
-    expect(pool.list()[0]?.status).toBe('failed');
+    const abort = new AbortController();
+    const result = pool.acquire(1, abort.signal);
+    const rejection = expect(result).rejects.toThrow('Stopped');
+    abort.abort(new Error('Stopped'));
+    expect(pool.assigned(1)).toBeUndefined();
+    expect(pool.list()[0]).toMatchObject({ status: 'available', failures: 0 });
+    await rejection;
+    expect(await pool.acquire(2)).toMatchObject({ assignedTo: 2 });
   });
-  it('prevents an allocation from resurrecting after browser closure', async () => {
-    const gate = deferred<ProxyValidation>();
-    const pool = new ProxyPool(() => gate.promise);
+
+  it('prevents a released allocation from being delivered after Stop', async () => {
+    const pool = new ProxyPool();
     pool.merge([record()]);
     const result = pool.acquire(1);
-    const rejection = expect(result).rejects.toThrow(/released|cancelled/);
+    const rejection = expect(result).rejects.toThrow('cancelled');
     pool.release(1);
-    gate.resolve(valid(record()));
     await rejection;
     expect(pool.assigned(1)).toBeUndefined();
-    expect(pool.list()[0]?.status).toBe('unverified');
+    expect(pool.list()[0]?.status).toBe('available');
   });
-  it('honors cancellation even when a validator ignores the signal', async () => {
-    const gate = deferred<ProxyValidation>();
-    const pool = new ProxyPool(() => gate.promise);
+
+  it('does not let an old cancellation or promise cleanup release a replacement lease', async () => {
+    const pool = new ProxyPool();
     pool.merge([record()]);
-    const controller = new AbortController();
-    const result = pool.acquire(1, controller.signal);
-    const rejection = expect(result).rejects.toThrow();
-    controller.abort();
-    gate.resolve(valid(record()));
+    const old = new AbortController();
+    const first = pool.acquire(1, old.signal);
+    const rejection = expect(first).rejects.toThrow();
+    pool.release(1);
+    const replacement = pool.acquire(1);
+    old.abort();
     await rejection;
-    expect(pool.assigned(1)).toBeUndefined();
+    expect(await replacement).toMatchObject({ assignedTo: 1 });
+    expect(pool.assigned(1)?.assignedTo).toBe(1);
   });
-  it('preserves active leases during provider refresh', async () => {
-    const pool = new ProxyPool(async (proxy) => valid(proxy));
-    pool.merge([record(1)]);
-    await pool.acquire(1);
-    pool.merge([record(2)]);
-    expect(pool.assigned(1)?.id).toBe(record(1).id);
+
+  it('leaves a delivered lease owned until explicit release closes its network operation', async () => {
+    const pool = new ProxyPool();
+    pool.merge([record()]);
+    const abort = new AbortController();
+    await pool.acquire(1, abort.signal);
+    abort.abort();
+    expect(pool.assigned(1)?.assignedTo).toBe(1);
+    expect(await pool.acquire(2)).toBeNull();
+    pool.release(1);
+    expect(await pool.acquire(2)).not.toBeNull();
+  });
+
+  it('preserves pending and active leases and their metadata during provider refresh', async () => {
+    const pool = new ProxyPool();
+    pool.merge([record()]);
+    const result = pool.acquire(1);
+    pool.merge([{ ...record(), country: 'AT', protocol: 'socks5' }, record(2)]);
+    expect(await result).toMatchObject({ id: record().id, country: 'US', assignedTo: 1 });
+    expect(pool.list()).toHaveLength(2);
+    expect(await pool.acquire(2)).toMatchObject({ id: record(2).id });
+    pool.merge([]);
     expect(pool.list()).toHaveLength(2);
   });
-  it('quarantines failures and allows a bounded later retry', async () => {
+
+  it('quarantines only an actual reported transport failure and becomes eligible after cooldown', async () => {
     let now = 1000;
-    let calls = 0;
-    const pool = new ProxyPool(
-      async (proxy) => {
-        calls++;
-        if (calls === 1) throw new Error('TLS rejected');
-        return valid(proxy);
-      },
-      { now: () => now, quarantineMs: 100 },
-    );
-    pool.merge([record()]);
-    expect(await pool.acquire(1)).toBeNull();
-    expect(await pool.acquire(1)).toBeNull();
-    expect(calls).toBe(1);
-    now += 101;
-    expect(await pool.acquire(1)).not.toBeNull();
-    expect(calls).toBe(2);
-  });
-  it('bounds candidate validation attempts', async () => {
-    let calls = 0;
-    const pool = new ProxyPool(
-      async () => {
-        calls++;
-        throw new Error('Unavailable');
-      },
-      { maxAttempts: 2 },
-    );
-    pool.merge([record(1), record(2), record(3)]);
-    expect(await pool.acquire(1)).toBeNull();
-    expect(calls).toBe(2);
-  });
-  it('releases and quarantines a transport failure without allocating elsewhere automatically', async () => {
-    const pool = new ProxyPool(async (proxy) => valid(proxy));
+    const pool = new ProxyPool({ now: () => now, quarantineMs: 100 });
     pool.merge([record()]);
     await pool.acquire(1);
     pool.release(1, 'ERR_PROXY_CONNECTION_FAILED');
-    expect(pool.assigned(1)).toBeUndefined();
+    pool.release(1, 'Duplicate cleanup must not count twice');
     expect(pool.list()[0]).toMatchObject({ status: 'failed', failures: 1 });
+    expect(await pool.acquire(2)).toBeNull();
+    now += 99;
+    expect(await pool.acquire(2)).toBeNull();
+    now += 1;
+    expect(pool.list()[0]?.status).toBe('available');
+    expect(await pool.acquire(2)).toMatchObject({ status: 'assigned', failures: 1, error: undefined });
   });
-  it('returns copies so UI consumers cannot change leases', async () => {
-    const pool = new ProxyPool(async (proxy) => valid(proxy));
+
+  it('keeps endpoint cooldown across omission, reappearance, protocol and ID changes in refreshes', async () => {
+    let now = 1000;
+    const pool = new ProxyPool({ now: () => now, quarantineMs: 100 });
     pool.merge([record()]);
+    await pool.acquire(1);
+    pool.release(1, 'Connection refused');
+    pool.merge([]);
+    pool.merge([{ ...record(), protocol: 'socks5', id: 'changed', country: 'AT' }]);
+    expect(pool.list()[0]).toMatchObject({ status: 'failed', country: 'AT', failures: 1 });
+    expect(await pool.acquire(2)).toBeNull();
+    now += 100;
+    expect(await pool.acquire(2)).toMatchObject({ protocol: 'socks5', country: 'AT' });
+  });
+
+  it('returns copies so callers cannot change provider records or active leases', async () => {
+    const pool = new ProxyPool();
+    const source = record();
+    pool.merge([source]);
+    source.ip = '9.9.9.9';
     const assigned = await pool.acquire(1);
     assigned!.assignedTo = 20;
-    expect(pool.assigned(1)?.assignedTo).toBe(1);
     pool.list()[0]!.status = 'available';
-    expect(pool.assigned(1)?.status).toBe('assigned');
-  });
-  it('validates reserves without sharing or releasing actual browser slots', async () => {
-    const gate = deferred<ProxyValidation>();
-    const pool = new ProxyPool(async (proxy) => (proxy.id === record(1).id ? gate.promise : valid(proxy)));
-    pool.merge([record(1), record(2)]);
-    const warm = pool.validateAvailable(1);
-    const browser = await pool.acquire(1);
-    expect(browser?.id).toBe(record(2).id);
-    gate.resolve(valid(record(1)));
-    await warm;
-    expect(pool.assigned(1)?.id).toBe(record(2).id);
-    expect(pool.list().find((proxy) => proxy.id === record(1).id)?.status).toBe('available');
+    expect(pool.assigned(1)).toMatchObject({ ip: '8.8.8.1', assignedTo: 1, status: 'assigned' });
   });
 });

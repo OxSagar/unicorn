@@ -10,10 +10,16 @@ export function proxyRule(proxy: ProxyRecord): string {
   return `${proxy.protocol}://${host}:${proxy.port}`;
 }
 
+function expectedResolution(proxy: ProxyRecord): string {
+  const host = proxy.ip.includes(':') ? `[${proxy.ip}]` : proxy.ip;
+  const protocol = { http: 'PROXY', https: 'HTTPS', socks5: 'SOCKS5' }[proxy.protocol];
+  return `${protocol} ${host}:${proxy.port}`;
+}
+
 export interface GateHooks {
   approveRequest?(url: string): void;
   approveNavigation(url: string, mainFrame: boolean): void;
-  onFailure(message: string, mainFrame: boolean): void;
+  onFailure(message: string, mainFrame: boolean, webContentsId?: number): void;
   onRestricted(status: number, url: string): void;
   onPolicyRestricted?(error: SiteRestrictionError): void;
 }
@@ -34,6 +40,7 @@ export class SessionGate {
   private readonly state: GateSessionState;
   private headersEnabled = false;
   private enabledGeneration?: number;
+  private readonly mainFrameGenerations = new Map<number, number>();
 
   constructor(
     readonly session: Session,
@@ -64,6 +71,8 @@ export class SessionGate {
         ) {
           this.hooks.approveNavigation(scopeUrl, details.resourceType === 'mainFrame');
         }
+        if (details.resourceType === 'mainFrame')
+          this.mainFrameGenerations.set(details.id, this.state.generation);
         callback({});
       } catch (error) {
         if (error instanceof SiteRestrictionError) {
@@ -74,6 +83,7 @@ export class SessionGate {
         this.hooks.onFailure(
           error instanceof Error ? error.message : String(error),
           details.resourceType === 'mainFrame',
+          details.webContentsId,
         );
         callback({ cancel: true });
       }
@@ -91,9 +101,17 @@ export class SessionGate {
       callback({});
     });
     session.webRequest.onErrorOccurred((details) => {
+      const mainFrame = details.resourceType === 'mainFrame';
+      const generation = this.mainFrameGenerations.get(details.id);
+      this.mainFrameGenerations.delete(details.id);
+      // A late error from an old route must not retire a newer endpoint lease.
+      if (mainFrame && generation !== this.enabledGeneration) return;
       if (this.isEnabled && !['net::ERR_ABORTED', 'net::ERR_BLOCKED_BY_CLIENT'].includes(details.error)) {
-        this.hooks.onFailure(details.error, details.resourceType === 'mainFrame');
+        this.hooks.onFailure(details.error, mainFrame, details.webContentsId);
       }
+    });
+    session.webRequest.onCompleted((details) => {
+      this.mainFrameGenerations.delete(details.id);
     });
   }
 
@@ -145,6 +163,7 @@ export class SessionGate {
     this.state.generation++;
     this.enabled = false;
     this.headersEnabled = false;
+    this.mainFrameGenerations.clear();
     await this.serial(async () => {
       let failure = this.state.poisoned;
       if (!failure) {
@@ -171,10 +190,12 @@ export class SessionGate {
     });
   }
 
-  async assign(proxy: ProxyRecord, signal: AbortSignal, synthetic: boolean): Promise<void> {
+  async assign(proxy: ProxyRecord, signal: AbortSignal, synthetic: boolean): Promise<string> {
     const generation = ++this.state.generation;
     this.enabled = false;
     this.headersEnabled = false;
+    this.mainFrameGenerations.clear();
+    let resolution = '';
     await this.serial(async () => {
       this.assertUsable();
       signal.throwIfAborted();
@@ -188,28 +209,34 @@ export class SessionGate {
           }),
         signal,
       );
+      // setProxy updates preferences before Chromium's network service necessarily
+      // observes them. Reload its configuration, then independently require the
+      // exact reserved route; reload alone does not prove which config was applied.
+      await this.mutation(() => this.session.forceReloadProxyConfig(), signal);
       signal.throwIfAborted();
-      const resolution = await withDeadline(
-        this.session.resolveProxy('https://unicorn.invalid/'),
-        8000,
-        signal,
-      );
+      resolution = (
+        await withDeadline(this.session.resolveProxy('https://unicorn.invalid/'), 8000, signal)
+      ).trim();
       signal.throwIfAborted();
       this.assertUsable();
       if (generation !== this.state.generation)
         throw new Error('Proxy assignment was superseded by a network stop');
-      if (/\bDIRECT\b/i.test(resolution) || !/^(PROXY|HTTPS|SOCKS5) /i.test(resolution)) {
-        throw new Error(`Unsafe proxy resolution: ${resolution}`);
-      }
+      const expected = expectedResolution(proxy);
+      if (resolution !== expected)
+        throw new Error(
+          `Unsafe proxy resolution: expected ${expected}; Chromium returned ${resolution || '(empty)'}`,
+        );
       this.headersEnabled = synthetic;
       this.enabledGeneration = generation;
       this.enabled = true;
     });
+    return resolution;
   }
 
   dispose(): void {
     this.state.generation++;
     this.enabled = false;
+    this.mainFrameGenerations.clear();
     // Keep the deny request handler for persisted service workers after a view closes.
     this.session.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (_details, callback) =>
       callback({ cancel: true }),
@@ -217,5 +244,6 @@ export class SessionGate {
     this.session.webRequest.onBeforeSendHeaders(null);
     this.session.webRequest.onHeadersReceived(null);
     this.session.webRequest.onErrorOccurred(null);
+    this.session.webRequest.onCompleted(null);
   }
 }

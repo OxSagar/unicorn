@@ -1,6 +1,6 @@
 {
   "name": "unicorn",
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0-rc.2",
   "private": true,
   "description": "A secure Windows workspace for isolated Chromium browser quality assurance",
   "author": "OxSagar",
