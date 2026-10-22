@@ -124,6 +124,21 @@ export async function createFixtures(
       );
       return;
     }
+    if (['/challenge-title', '/challenge-widget', '/challenge-delayed', '/challenge-hidden'].includes(path)) {
+      const title = path === '/challenge-title' ? 'Just a moment...' : 'Controlled challenge fixture';
+      const widget =
+        '<div class="cf-turnstile" data-sitekey="fixture" style="width:300px;height:70px">Controlled verification widget</div>';
+      response.setHeader('Content-Type', 'text/html; charset=utf-8');
+      response.end(`<!doctype html><html><head><title>${title}</title></head><body>
+        <h1>Controlled access-control fixture</h1>
+        ${path === '/challenge-widget' ? widget : ''}
+        ${path === '/challenge-hidden' ? `<div style="display:none">${widget}</div>` : ''}
+        <button id="challenge-action" onclick="window.challengeInteractions++">Verify</button>
+        <script>window.challengeInteractions = 0;
+          ${path === '/challenge-delayed' ? `setTimeout(() => document.body.insertAdjacentHTML('beforeend', ${JSON.stringify(widget)}), 300);` : ''}
+        </script></body></html>`);
+      return;
+    }
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     response.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Unicorn fixture ${path}</title>
       <style>body{font:18px sans-serif;margin:24px} .long{height:4200px;background:linear-gradient(#eef,#cdc)}</style></head>

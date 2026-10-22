@@ -28,7 +28,7 @@ Validation uses `https://ipwho.is/` through the candidate. The TLS certificate c
 
 The allocator reserves endpoints synchronously before awaiting validation, preventing two active browsers from racing for one endpoint. Duplicate observed exit IPs are also rejected when uniqueness is enabled. Failed candidates are quarantined. A stop invalidates a pending lease, so a late validation response cannot revive a cancelled run. Validation establishes a recent observation, not a guarantee that a public proxy will stay available or keep the same route indefinitely.
 
-Unreliable transport errors may trigger a bounded retry with a new eligible proxy. HTTP 401, 403 and 429 instead stop the test. TLS verification is never disabled to make a failing proxy pass. Public proxy coverage and availability are outside Unicorn's control; a waiting state is a valid outcome.
+Recognized Chromium connection failures may trigger a bounded retry with a new eligible proxy. HTTP 401, 403 and 429 instead stop the test. Certificate errors, TLS policy failures, application deadlines and unrecognized errors do not trigger proxy rotation. TLS verification is never disabled to make a failing proxy pass. Public proxy coverage and availability are outside Unicorn's control; a waiting state is a valid outcome.
 
 ## Scope and rate controls
 
@@ -37,6 +37,8 @@ Domains must be explicitly approved. Exact-host matching is the default; `*.exam
 During synthetic QA, the same scope also applies to all HTTP, HTTPS and WebSocket subresource requests. An unapproved advertising script or tracking endpoint is blocked before dispatch. Add required CDN and asset hosts explicitly to the authorized list; omitting them can cause expected page-resource failures. Manual browsing allows ordinary third-party subresources through the assigned proxy. Neither a domain allowlist nor a blocklist can prove that an allowed page or resource uses test advertising rather than a live campaign.
 
 Automated testing requires a staging or test-ad confirmation. It is the operator's responsibility to configure those environments accurately. Code cannot independently determine whether every permitted page carries monetized advertising. DOM link discovery excludes recognizable advertising containers, sponsored/nofollow links and download links. It never clicks advertisement elements. Unmarked advertising and site-specific behavior are a reason to use controlled staging fixtures instead of production ad placements.
+
+Synthetic navigation and periodic stage checks detect rendered reCAPTCHA, hCaptcha and Turnstile widgets, known provider challenge iframes and a narrow set of challenge-page titles. A match immediately closes the session's request gate and stops the job with `Challenge detected; testing requires manual review`; no challenge is clicked, solved or submitted, and the failure cannot enter the proxy retry path. The controller removes the failed target from scheduled recurrence and pauses further work for that browser. These checks recognize explicit known markers, not every possible CAPTCHA or custom access-control page. Hidden widgets and general articles about CAPTCHA are not treated as visible challenges. Manual browsing does not run this synthetic challenge detector.
 
 Daily budgets count top-level navigation attempts before dispatch. They persist across application restarts and reset by UTC date. They do not count all subresources or impose a full network-request quota. Scheduling requires a minimum one-minute cycle interval and a configured operating window. Per-job retries are bounded. Emergency stop closes the request gate and cancels current task waits.
 
@@ -64,3 +66,6 @@ Security tests and build audits reduce risk but do not prove the absence of all 
 - [Chromium proxy networking](https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/proxy.md)
 - [ProxyScrape free proxy API](https://docs.proxyscrape.com/api-reference/public-api/get-proxy-list)
 - [IPWho.is API and limits](https://ipwhois.io/documentation)
+- [Google reCAPTCHA widget markup](https://developers.google.com/recaptcha/docs/display)
+- [hCaptcha widget configuration](https://docs.hcaptcha.com/configuration)
+- [Cloudflare Turnstile widget markup](https://developers.cloudflare.com/turnstile/get-started/client-side-rendering/)

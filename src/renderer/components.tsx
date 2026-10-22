@@ -1,3 +1,4 @@
+import { cloneElement, isValidElement, useId } from 'react';
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
 
 export type IconName =
@@ -261,11 +262,16 @@ export function SectionTitle({
   );
 }
 export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  const labelId = useId();
+  const hintId = useId();
+  const control = isValidElement<{ 'aria-labelledby'?: string; 'aria-describedby'?: string }>(children)
+    ? cloneElement(children, { 'aria-labelledby': labelId, 'aria-describedby': hint ? hintId : undefined })
+    : children;
   return (
     <label className="field">
-      <span>{label}</span>
-      {children}
-      {hint && <small>{hint}</small>}
+      <span id={labelId}>{label}</span>
+      {control}
+      {hint && <small id={hintId}>{hint}</small>}
     </label>
   );
 }

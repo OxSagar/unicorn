@@ -23,6 +23,8 @@ import { assertApproved } from '../core/scope';
 import { canTransition, transition } from '../core/state';
 import { validateDevice } from '../core/validation';
 import { SessionGate } from '../network/session-gate';
+import { isRetryableTransportError } from '../network/transport-error';
+import { CHALLENGE_MESSAGE, detectChallenge } from '../qa/challenge';
 import { RunControl } from '../qa/control';
 import { runStages } from '../qa/stages';
 import { applyDevice, fitDevice, readDiagnostic } from './device';
@@ -75,9 +77,6 @@ interface Entry {
   closing: boolean;
   downloads: Set<Electron.DownloadItem>;
 }
-const TRANSPORT_FAILURE =
-  /ERR_(PROXY_CONNECTION_FAILED|TUNNEL_CONNECTION_FAILED|CONNECTION_(CLOSED|RESET|REFUSED|TIMED_OUT)|TIMED_OUT|SOCKS_CONNECTION_FAILED|PROXY_AUTH_UNSUPPORTED|PROXY_AUTH_REQUESTED|CERT_[A-Z_]+|SSL_[A-Z_]+)/;
-
 export class BrowserManager {
   private entries = new Map<number, Entry>();
   private creating: Promise<void> = Promise.resolve();
@@ -565,9 +564,25 @@ export class BrowserManager {
     }
     await control.checkpoint();
     if (entry.restricted) throw entry.restricted;
+    if (entry.synthetic) await this.checkChallenge(entry, control);
     this.move(entry, 'RUNNING');
     entry.snapshot.url = contents.getURL();
     this.changed();
+  }
+
+  private async checkChallenge(entry: Entry, control: RunControl): Promise<void> {
+    await control.checkpoint();
+    if (entry.restricted) throw entry.restricted;
+    if (!(await detectChallenge(entry.view.webContents, control.signal))) return;
+    entry.restricted = new Error(CHALLENGE_MESSAGE);
+    entry.snapshot.lastError = CHALLENGE_MESSAGE;
+    entry.snapshot.stage = 'Manual review required';
+    this.log(entry, 'warn', 'authorization', CHALLENGE_MESSAGE);
+    // block() disables requests synchronously, including background workers and popup traffic.
+    void entry.gate.block().catch((error: unknown) => this.log(entry, 'error', 'network', String(error)));
+    entry.abort?.abort(entry.restricted);
+    this.changed();
+    throw entry.restricted;
   }
 
   private operation(
@@ -656,7 +671,7 @@ export class BrowserManager {
               if (
                 control.signal.aborted ||
                 entry.restricted ||
-                !TRANSPORT_FAILURE.test(message) ||
+                !isRetryableTransportError(error) ||
                 attempt >= this.options.settings().retryLimit
               )
                 throw error;
@@ -672,6 +687,7 @@ export class BrowserManager {
           entry.snapshot.stage = stage;
           this.changed();
         },
+        checkChallenge: () => this.checkChallenge(entry, control),
         capture: async (stage) => this.capture(entry, stage, control.signal),
         log: (message) => this.log(entry, 'info', 'qa', message),
       });

@@ -14,6 +14,11 @@ describe('authorized navigation scope', () => {
     expect(normalizeUrl(' HTTPS://EXAMPLE.COM:443/a?b=2&a=1#route ')).toBe(
       'https://example.com/a?b=2&a=1#route',
     ));
+  it('bounds the canonical URL after Unicode percent-encoding expands the input', () => {
+    expect(() => normalizeUrl(`https://example.com/${'\u4e00'.repeat(1000)}`)).toThrow(/normalized URL/);
+    const accepted = normalizeUrl(`https://example.com/${'\u4e00'.repeat(100)}`);
+    expect(normalizeUrl(accepted)).toBe(accepted);
+  });
   it.each([
     'javascript:alert(1)',
     'file:///etc/passwd',

@@ -31,6 +31,7 @@ export function normalizeUrl(input: string, options: { allowLocalhost?: boolean 
   if (isIP(bare) && !local && !isPublicIp(bare))
     throw new Error('Private network destinations are not supported');
   url.hostname = url.hostname.replace(/\.$/, '').toLowerCase();
+  if (url.href.length > 8192) throw new Error('The normalized URL exceeds the 8,192-character limit');
   return url.href;
 }
 

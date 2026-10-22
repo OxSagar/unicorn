@@ -31,7 +31,9 @@ export class UnicornController {
   readonly pool: ProxyPool;
   private budget: DomainBudget;
   private active = new Map<number, Promise<void>>();
+  private acceptedJobs = new Map<number, Set<string>>();
   private stopped = new Set<number>();
+  private pausedIds = new Set<number>();
   private paused = false;
   private scheduleArmed = false;
   private closing = false;
@@ -295,7 +297,7 @@ export class UnicornController {
     return this.refreshPromise;
   }
 
-  private begin(ids: number[]): void {
+  private begin(ids: number[], captureTemplates = true, eligibleJobs?: ReadonlySet<string>): void {
     if (!this.data.settings.stagingConfirmed || !this.data.settings.authorizedDomains.length)
       throw new Error(
         'Configure the authorized domains and confirm a staging or test-ad environment before QA.',
@@ -304,17 +306,46 @@ export class UnicornController {
       throw new Error(
         'The memory budget is exceeded. Close browsers or raise the configured budget before starting another job.',
       );
-    if (!ids.some((id) => this.data.jobs.some((job) => job.browserId === id && job.status === 'pending')))
+    const selected = new Set(ids);
+    const accepted =
+      eligibleJobs ??
+      new Set(
+        this.data.jobs
+          .filter((job) => selected.has(job.browserId) && job.status === 'pending')
+          .map((job) => job.id),
+      );
+    if (
+      !ids.some((id) =>
+        this.data.jobs.some(
+          (job) => job.browserId === id && job.status === 'pending' && accepted.has(job.id),
+        ),
+      )
+    )
       throw new Error('Distribute URLs to create pending test jobs first.');
     this.paused = false;
     this.scheduleArmed = this.data.settings.schedule.enabled;
+    if (captureTemplates) {
+      this.data.scheduleTemplates = [
+        ...this.data.scheduleTemplates.filter((job) => !selected.has(job.browserId)),
+        ...this.data.jobs
+          .filter((job) => selected.has(job.browserId) && job.status === 'pending' && accepted.has(job.id))
+          .map(({ browserId, url }) => ({ browserId, url })),
+      ].slice(0, 1000);
+    }
     for (const id of ids) {
+      this.pausedIds.delete(id);
+      const eligible = this.active.has(id)
+        ? (this.acceptedJobs.get(id) ?? new Set<string>())
+        : new Set<string>();
+      for (const job of this.data.jobs)
+        if (job.browserId === id && job.status === 'pending' && accepted.has(job.id)) eligible.add(job.id);
+      this.acceptedJobs.set(id, eligible);
       if (this.active.has(id)) {
         void this.manager.resume(id).catch((error) => this.logs.add('warn', 'job', String(error), id));
         continue;
       }
       this.stopped.delete(id);
-      const operation = this.worker(id).finally(() => {
+      const operation = this.worker(id, eligible).finally(() => {
         this.active.delete(id);
         this.persistSoon();
         this.changed();
@@ -325,9 +356,11 @@ export class UnicornController {
     }
     this.changed();
   }
-  private async worker(id: number): Promise<void> {
-    while (!this.closing && !this.stopped.has(id) && !this.paused) {
-      const job = this.data.jobs.find((item) => item.browserId === id && item.status === 'pending');
+  private async worker(id: number, eligibleJobs: ReadonlySet<string>): Promise<void> {
+    while (!this.closing && !this.stopped.has(id) && !this.paused && !this.pausedIds.has(id)) {
+      const job = this.data.jobs.find(
+        (item) => item.browserId === id && item.status === 'pending' && eligibleJobs.has(item.id),
+      );
       if (!job || this.performance.memoryMb > this.data.settings.resourceLimitMb) break;
       job.status = 'running';
       job.error = undefined;
@@ -348,6 +381,22 @@ export class UnicornController {
         } else {
           job.status = 'failed';
           this.data.totals.failed++;
+          this.pausedIds.add(id);
+          this.data.scheduleTemplates = this.data.scheduleTemplates.filter(
+            (template) => template.browserId !== id || template.url !== job.url,
+          );
+          if (/HTTP (401|403|429)|challenge detected|rate.?limit|daily navigation limit/i.test(job.error)) {
+            const host = new URL(job.url).hostname;
+            this.data.scheduleTemplates = this.data.scheduleTemplates.filter(
+              (template) => new URL(template.url).hostname !== host,
+            );
+            for (const pending of this.data.jobs)
+              if (pending.status === 'pending' && new URL(pending.url).hostname === host) {
+                pending.status = 'cancelled';
+                pending.finishedAt = Date.now();
+                pending.error = 'Host requires manual review after an access restriction.';
+              }
+          }
         }
         job.finishedAt = Date.now();
         this.logs.add('warn', 'job', job.error, id);
@@ -366,26 +415,81 @@ export class UnicornController {
       return;
     const schedule = this.data.settings.schedule;
     if (!inOperatingWindow(new Date(), schedule.startHour, schedule.endHour)) return;
-    if (!this.data.jobs.some((job) => job.status === 'pending')) {
-      const templates = new Map<string, (typeof this.data.jobs)[number]>();
-      for (const job of this.data.jobs)
-        if (job.status === 'completed') templates.set(`${job.browserId}\n${job.url}`, job);
-      this.data.jobs = this.data.jobs.slice(-500);
-      for (const job of templates.values())
-        this.data.jobs.push({
+    const open = new Set(
+      this.manager
+        .snapshots()
+        .map((item) => item.id)
+        .filter((id) => !this.pausedIds.has(id)),
+    );
+    const accepted = new Set<string>();
+    const ids = new Set<number>();
+    let pendingCount = this.data.jobs.filter((job) => ['pending', 'running'].includes(job.status)).length;
+    this.data.jobs = [
+      ...this.data.jobs.filter((job) => !['pending', 'running'].includes(job.status)).slice(-500),
+      ...this.data.jobs.filter((job) => ['pending', 'running'].includes(job.status)),
+    ];
+    for (const template of this.data.scheduleTemplates.filter((job) => open.has(job.browserId))) {
+      let job = this.data.jobs.find(
+        (item) =>
+          item.status === 'pending' &&
+          item.browserId === template.browserId &&
+          item.url === template.url &&
+          !accepted.has(item.id),
+      );
+      if (!job && pendingCount < 1000) {
+        job = {
           id: randomUUID(),
-          browserId: job.browserId,
-          url: job.url,
+          browserId: template.browserId,
+          url: template.url,
           createdAt: Date.now(),
           status: 'pending',
-        });
+        };
+        this.data.jobs.push(job);
+        pendingCount++;
+      }
+      if (job) {
+        accepted.add(job.id);
+        ids.add(job.browserId);
+      }
     }
     this.data.nextRunAt = Date.now() + schedule.intervalMinutes * 60000;
+    this.persistSoon();
+    if (!accepted.size) return;
     try {
-      this.begin(this.manager.snapshots().map((item) => item.id));
+      this.begin([...ids], false, accepted);
     } catch (error) {
       this.logs.add('warn', 'schedule', String(error));
     }
+  }
+
+  private cancelBrowserQueue(ids: number[], reason: string): void {
+    const selected = new Set(ids);
+    for (const id of ids) {
+      this.stopped.add(id);
+      this.pausedIds.add(id);
+      this.acceptedJobs.delete(id);
+    }
+    for (const job of this.data.jobs)
+      if (selected.has(job.browserId) && job.status === 'pending') {
+        job.status = 'cancelled';
+        job.finishedAt = Date.now();
+        job.error = reason;
+      }
+    this.data.scheduleTemplates = this.data.scheduleTemplates.filter((job) => !selected.has(job.browserId));
+  }
+
+  private reviewedPending(ids: number[]): Set<string> {
+    const selected = new Set(ids);
+    return new Set(
+      this.data.jobs
+        .filter(
+          (job) =>
+            selected.has(job.browserId) &&
+            job.status === 'pending' &&
+            this.acceptedJobs.get(job.browserId)?.has(job.id),
+        )
+        .map((job) => job.id),
+    );
   }
 
   async command(command: AppCommand): Promise<CommandResult> {
@@ -397,7 +501,13 @@ export class UnicornController {
       case 'snapshot':
         break;
       case 'create':
-        for (const item of this.manager.snapshots()) if (item.id > command.count) this.stopped.add(item.id);
+        this.cancelBrowserQueue(
+          this.manager
+            .snapshots()
+            .filter((item) => item.id > command.count)
+            .map((item) => item.id),
+          'Browser closed by workspace resize.',
+        );
         await this.manager.create(command.count);
         this.data.settings.browserCount = command.count;
         break;
@@ -408,8 +518,15 @@ export class UnicornController {
       case 'browser':
         if (command.action === 'start') this.begin([command.id]);
         else {
-          if (command.action === 'stop' || command.action === 'close') this.stopped.add(command.id);
+          if (command.action === 'stop' || command.action === 'close')
+            this.cancelBrowserQueue([command.id], 'Browser stopped by user.');
+          if (command.action === 'pause') this.pausedIds.add(command.id);
+          if (command.action === 'resume') this.pausedIds.delete(command.id);
           await this.manager.action(command.id, command.action);
+          if (command.action === 'resume' && !this.active.has(command.id)) {
+            const reviewed = this.reviewedPending([command.id]);
+            if (reviewed.size) this.begin([command.id], false, reviewed);
+          }
         }
         break;
       case 'global': {
@@ -420,15 +537,16 @@ export class UnicornController {
           await Promise.all(ids.map((id) => this.manager.pause(id)));
         } else if (command.action === 'resume') {
           this.paused = false;
+          for (const id of ids) this.pausedIds.delete(id);
           await Promise.all(ids.map((id) => this.manager.resume(id)));
-          const pendingIds = ids.filter(
-            (id) =>
-              !this.active.has(id) &&
-              this.data.jobs.some((job) => job.browserId === id && job.status === 'pending'),
-          );
-          if (pendingIds.length) this.begin(pendingIds);
+          const pendingIds = ids.filter((id) => !this.active.has(id));
+          const reviewed = this.reviewedPending(pendingIds);
+          if (reviewed.size) this.begin(pendingIds, false, reviewed);
         } else {
           this.scheduleArmed = false;
+          this.data.settings.schedule.enabled = false;
+          this.data.scheduleTemplates = [];
+          this.acceptedJobs.clear();
           this.paused = false;
           this.data.nextRunAt = null;
           for (const id of ids) this.stopped.add(id);
@@ -463,10 +581,21 @@ export class UnicornController {
         break;
       }
       case 'job':
+        {
+          const removed = this.data.jobs.find((job) => job.id === command.id && job.status !== 'running');
+          if (removed)
+            this.data.scheduleTemplates = this.data.scheduleTemplates.filter(
+              (job) => job.browserId !== removed.browserId || job.url !== removed.url,
+            );
+        }
         this.data.jobs = this.data.jobs.filter((job) => job.id !== command.id || job.status === 'running');
         break;
       case 'clear-queue':
         this.data.jobs = this.data.jobs.filter((job) => job.status !== 'pending');
+        this.data.scheduleTemplates = [];
+        this.scheduleArmed = false;
+        this.data.nextRunAt = null;
+        this.data.settings.schedule.enabled = false;
         break;
       case 'settings': {
         const next = validateSettings(command.settings);
@@ -474,6 +603,21 @@ export class UnicornController {
         await Promise.all(this.manager.snapshots().map((item) => this.manager.stop(item.id)));
         this.poolOptions.uniqueExitIps = next.uniqueExitIps;
         this.data.settings = next;
+        this.cancelBrowserQueue(
+          this.manager
+            .snapshots()
+            .filter((item) => item.id > next.browserCount)
+            .map((item) => item.id),
+          'Browser closed by settings.',
+        );
+        this.data.scheduleTemplates = this.data.scheduleTemplates.filter((job) => {
+          try {
+            assertApproved(job.url, next);
+            return true;
+          } catch {
+            return false;
+          }
+        });
         this.scheduleArmed = next.schedule.enabled;
         this.paused = false;
         this.data.nextRunAt = next.schedule.enabled

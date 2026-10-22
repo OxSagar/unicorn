@@ -86,10 +86,14 @@ export default function SchedulesPage({ snapshot, run, busy }: PageProps) {
           </div>
           <Toggle
             label="Repeat authorized test runs"
-            hint="Re-run configured test URLs at the saved interval while Unicorn is open."
+            hint="Save this option, then Start a reviewed queue to choose the recurring URLs."
             checked={schedule.enabled}
             onChange={(enabled) => setSchedule({ ...schedule, enabled })}
           />
+          <p className="muted small-text">
+            New assignments wait for Start. Clear pending and Stop all disable saved recurrence, including
+            recovery after restart.
+          </p>
           <div className="form-grid">
             <Field label="Interval (minutes)" hint="Minimum 1 minute between cycles; the default is 30.">
               <input
@@ -140,7 +144,7 @@ export default function SchedulesPage({ snapshot, run, busy }: PageProps) {
           </p>
           <Toggle
             label="Resume eligible work after restart"
-            hint="Restores authorized scheduled work after an interrupted app session."
+            hint="Restores previously started recurring URLs after an interrupted app session."
             checked={schedule.resumeAfterRestart}
             onChange={(resumeAfterRestart) => setSchedule({ ...schedule, resumeAfterRestart })}
           />

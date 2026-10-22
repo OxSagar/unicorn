@@ -9,6 +9,7 @@ export interface QaHooks {
   settings: () => AppSettings;
   control: RunControl;
   navigate(url: string): Promise<void>;
+  checkChallenge(): Promise<void>;
   stage(name: string): void;
   capture(stage: string): Promise<void>;
   log(message: string): void;
@@ -31,6 +32,7 @@ async function scroll(hooks: QaHooks, durationMs: number): Promise<void> {
   const url = hooks.contents.getURL();
   for (let step = 0; step < steps && durationMs > 0; step++) {
     await hooks.control.checkpoint();
+    if (step % 5 === 0) await hooks.checkChallenge();
     if (hooks.contents.isDestroyed() || hooks.contents.getURL() !== url)
       throw new Error('Page changed during scroll inspection');
     const progress = step / Math.max(1, steps - 1);
@@ -51,9 +53,14 @@ async function scroll(hooks: QaHooks, durationMs: number): Promise<void> {
 
 async function inspect(hooks: QaHooks, stage: string, waitMs: number, scrollMs: number): Promise<void> {
   hooks.stage(`${stage}: initialization`);
-  await hooks.control.wait(waitMs);
+  await hooks.checkChallenge();
+  for (let remaining = waitMs; remaining > 0; remaining -= 1000) {
+    await hooks.control.wait(Math.min(remaining, 1000));
+    await hooks.checkChallenge();
+  }
   hooks.stage(`${stage}: scroll inspection`);
   await scroll(hooks, scrollMs);
+  await hooks.checkChallenge();
   await hooks.capture(stage);
 }
 

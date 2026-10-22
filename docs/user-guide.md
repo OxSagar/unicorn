@@ -74,16 +74,16 @@ HTTPS is the normal navigation scheme. **Allow local test fixtures** additionall
 
 The number selector and **Apply** resize the open workspace. Reducing the count closes the higher-numbered sessions after confirmation. Their persistent data remains available when those profile numbers are reopened.
 
-| Control                         | Behavior                                                                            |
-| ------------------------------- | ----------------------------------------------------------------------------------- |
-| Start all                       | Starts pending QA jobs for open browsers; configure scope and distribute URLs first |
-| Pause all                       | Pauses test orchestration and the affected network activity                         |
-| Resume all                      | Resumes paused work and eligible pending jobs                                       |
-| Stop all                        | Cancels current work and disarms the running monitoring schedule                    |
-| `Ctrl+Shift+S`                  | Emergency stop while the application is focused                                     |
-| Select all / profile checkboxes | Chooses profiles for link and device operations                                     |
-| Grid layout                     | Selects automatic layout or one to four columns                                     |
-| Expand                          | Uses the workspace area to inspect one browser; **All browsers** restores the grid  |
+| Control                         | Behavior                                                                             |
+| ------------------------------- | ------------------------------------------------------------------------------------ |
+| Start all                       | Starts pending QA jobs for open browsers; configure scope and distribute URLs first  |
+| Pause all                       | Pauses test orchestration and the affected network activity                          |
+| Resume all                      | Resumes paused work and eligible pending jobs                                        |
+| Stop all                        | Cancels current work and disables saved recurrence, including recovery after restart |
+| `Ctrl+Shift+S`                  | Emergency stop while the application is focused                                      |
+| Select all / profile checkboxes | Chooses profiles for link and device operations                                      |
+| Grid layout                     | Selects automatic layout or one to four columns                                      |
+| Expand                          | Uses the workspace area to inspect one browser; **All browsers** restores the grid   |
 
 Each browser panel has an address field, Back, Forward, Reload/Stop loading, Start, Pause, and Stop controls. Enter a complete approved URL and press Enter or the arrow to browse manually. Manual address navigation is separate from the timed QA sequence. It still requires an approved top-level destination and verified proxy. Manual browsing can load ordinary third-party subresources through that proxy; repeated QA uses the stricter authorized subresource scope.
 
@@ -145,7 +145,7 @@ The original input list stays visible after distribution. Review syntax errors a
 
 Duplicate pending jobs are excluded unless you enable the duplicate option. Distinct profile assignments used for a compatibility comparison are still meaningful separate jobs.
 
-Distribution does not start browsing. Inspect **Queue preview** first. Remove a pending job and redistribute its URL to change that assignment. **Clear pending** removes pending assignments; completed and failed records remain only within the application’s bounded retained history. Export results when you need an external record.
+Distribution does not start browsing. Inspect **Queue preview** first. Remove a pending job and redistribute its URL to change that assignment. **Clear pending** removes pending assignments and disables saved recurrence, including recovery after restart; completed and failed records remain only within the application’s bounded retained history. Export results when you need an external record.
 
 ## 6. Device profiles
 
@@ -197,7 +197,11 @@ In **Test schedules**, edit the stage durations, navigation timeout, maximum scr
 
 Operating hours use the Windows computer’s local timezone. `00:00` through `24:00` allows the full day. A window that crosses midnight is supported. Daily navigation budgets use UTC dates and reset at 00:00 UTC; failed attempts consume budget too. The limit counts navigation attempts per host, not every image, script, or API request made by a page.
 
-Repeated monitoring uses completed job URLs as templates for subsequent cycles. Paused work remains paused until resumed. Emergency Stop cancels the active operation and disarms scheduling; Start or a saved schedule can arm eligible work again. After a restart, automatic resumption requires both an eligible saved schedule and the **Resume eligible work after restart** option.
+To set up repeated monitoring, enable **Repeat authorized test runs**, select **Save schedule**, then review the queue and select **Start tests**, **Start all**, a browser’s **Start**, or **Run queued tests now**. Start captures the current pending jobs for the chosen browsers as their recurring URLs. Historical completed records do not become recurring work. Starting a replacement queue for one browser replaces that browser’s recurring URLs while retaining the saved sets for other browsers.
+
+New assignments remain pending until another Start. Pause preserves unfinished reviewed work until Resume. Stopping or closing an individual browser, or reducing the browser count, cancels that browser’s remaining queue and removes its recurrence. **Stop all** or **Emergency stop** cancels active work and disables saved recurrence while leaving pending assignments available for review. **Clear pending** removes pending assignments and also disables saved recurrence. These actions remain effective after an application restart. To set up recurrence again, enable and save the schedule, then review and Start the desired queue.
+
+Automatic recovery after an interrupted application session requires saved recurring URLs, an enabled schedule, and **Resume eligible work after restart**. Access restrictions, detected challenges, rate limits, and exhausted daily navigation budgets cancel pending work and remove recurrence for the affected host; inspect the cause before assigning and starting new work.
 
 Windows sleep pauses tests. After the computer resumes, confirm network availability and use Resume. Keeping the process open in the tray does not make it a Windows service. Interactive Chromium rendering requires an appropriate logged-in user session; operation after logout is not promised.
 

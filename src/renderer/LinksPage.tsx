@@ -246,7 +246,7 @@ export default function LinksPage({
               onClick={() =>
                 confirm(
                   'Clear pending queue?',
-                  'Pending assignments will be removed. Completed test records remain available.',
+                  'Pending assignments will be removed and saved recurrence disabled. Completed test records remain available.',
                   () => void run({ type: 'clear-queue' }),
                 )
               }

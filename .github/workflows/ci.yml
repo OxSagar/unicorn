@@ -53,10 +53,37 @@ jobs:
       - name: Generate isolated HTTPS fixture certificate
         run: node tests/fixtures/prepare-cert.mjs
       - name: Trust the fixture certificate in this temporary runner
+        timeout-minutes: 2
         shell: pwsh
         run: |
-          $cert = Import-Certificate -FilePath test-results/certificates/fixture.cer -CertStoreLocation Cert:\CurrentUser\Root
-          "UNICORN_FIXTURE_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
+          $ErrorActionPreference = 'Stop'
+          $certificatePath = (Resolve-Path 'test-results/certificates/fixture.cer').Path
+          $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
+          if ($certificate.Subject -ne 'CN=Unicorn Local QA Fixture' -or $certificate.Issuer -ne $certificate.Subject) {
+            throw 'The generated certificate is not the expected isolated fixture CA'
+          }
+          $thumbprint = $certificate.Thumbprint
+          "UNICORN_FIXTURE_THUMBPRINT=$thumbprint" >> $env:GITHUB_ENV
+          # Hosted Windows runners are administrators. The machine store avoids the
+          # current-user root import confirmation dialog in an unattended session.
+          # Only this freshly generated test certificate is added; TLS checks stay on.
+          $stdout = Join-Path $env:GITHUB_WORKSPACE 'test-results/certificate-import.stdout.txt'
+          $stderr = Join-Path $env:GITHUB_WORKSPACE 'test-results/certificate-import.stderr.txt'
+          $arguments = @('-f', '-addstore', 'Root', ('"{0}"' -f $certificatePath))
+          $process = Start-Process -FilePath "$env:SystemRoot\System32\certutil.exe" -ArgumentList $arguments -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          if (!$process.WaitForExit(30000)) {
+            $process.Kill()
+            throw 'Fixture certificate import timed out after 30 seconds'
+          }
+          Get-Content $stdout
+          Get-Content $stderr
+          if ($process.ExitCode -ne 0) { throw "Certificate import failed: $($process.ExitCode)" }
+          $installed = Get-Item "Cert:\LocalMachine\Root\$thumbprint" -ErrorAction Stop
+          if ([Convert]::ToBase64String($installed.RawData) -ne [Convert]::ToBase64String($certificate.RawData)) {
+            throw 'The installed fixture certificate does not match the generated certificate'
+          }
+          Write-Host "Verified isolated fixture CA in LocalMachine\Root: $thumbprint"
+          $certificate.Dispose()
       - name: Exercise real Chromium and proxy failures
         run: npm run test:e2e
       - name: Build Windows installer and portable archive
@@ -83,10 +110,14 @@ jobs:
       - run: npm run checksums
       - name: Remove the temporary trusted certificate
         if: always()
+        timeout-minutes: 1
         shell: pwsh
         run: |
-          if ($env:UNICORN_FIXTURE_THUMBPRINT) {
-            Remove-Item "Cert:\CurrentUser\Root\$env:UNICORN_FIXTURE_THUMBPRINT" -ErrorAction SilentlyContinue
+          if ($env:UNICORN_FIXTURE_THUMBPRINT -match '^[0-9A-Fa-f]{40}$') {
+            $certificatePath = "Cert:\LocalMachine\Root\$env:UNICORN_FIXTURE_THUMBPRINT"
+            if (Test-Path $certificatePath) {
+              Remove-Item $certificatePath -Force -Confirm:$false -ErrorAction Stop
+            }
           }
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: always()
