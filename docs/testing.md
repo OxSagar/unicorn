@@ -17,20 +17,43 @@ Unit suites cover proxy JSON parsing, all seven eligible countries, invalid/nonp
 
 The Playwright suite launches the actual application and communicates with its real Electron main process and browser views. It does not replace Chromium with mocked pages. Local servers provide deterministic HTTP, HTTPS, WebSocket, proxy, and failure fixtures.
 
-Generate a temporary certificate before running the HTTPS tests:
+Run the following from the repository in **PowerShell as Administrator** on the Windows test machine. It generates a short-lived fixture certificate, imports that exact public certificate into the machine root store, runs the tests, and removes the same certificate even if the build or tests fail. The machine-store import avoids an unattended current-user root confirmation dialog; the command has a 30-second deadline.
 
 ```powershell
+$ErrorActionPreference = 'Stop'
 node tests/fixtures/prepare-cert.mjs
-$cert = Import-Certificate -FilePath test-results/certificates/fixture.cer -CertStoreLocation Cert:\CurrentUser\Root
+if ($LASTEXITCODE -ne 0) { throw 'Fixture certificate generation failed' }
+$certificatePath = (Resolve-Path 'tmp/test-certificates/fixture.cer').Path
+$certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
+if ($certificate.Subject -ne 'CN=Unicorn Local QA Fixture' -or $certificate.Issuer -ne $certificate.Subject) {
+  throw 'The generated certificate is not the expected isolated fixture CA'
+}
+$storePath = "Cert:\LocalMachine\Root\$($certificate.Thumbprint)"
 try {
+  $arguments = @('-f', '-addstore', 'Root', ('"{0}"' -f $certificatePath))
+  $process = Start-Process -FilePath "$env:SystemRoot\System32\certutil.exe" -ArgumentList $arguments -PassThru -NoNewWindow
+  if (!$process.WaitForExit(30000)) {
+    $process.Kill()
+    throw 'Fixture certificate import timed out'
+  }
+  if ($process.ExitCode -ne 0) { throw "Certificate import failed: $($process.ExitCode)" }
+  $installed = Get-Item $storePath -ErrorAction Stop
+  if ([Convert]::ToBase64String($installed.RawData) -ne [Convert]::ToBase64String($certificate.RawData)) {
+    throw 'Installed certificate does not match the generated fixture'
+  }
   npm run build
+  if ($LASTEXITCODE -ne 0) { throw 'Application build failed' }
   npm run test:e2e
+  if ($LASTEXITCODE -ne 0) { throw 'Windows end-to-end tests failed' }
 } finally {
-  Remove-Item "Cert:\CurrentUser\Root\$($cert.Thumbprint)"
+  if (Test-Path $storePath) {
+    Remove-Item $storePath -Force -Confirm:$false -ErrorAction Stop
+  }
+  $certificate.Dispose()
 }
 ```
 
-Only the generated fixture certificate is trusted. The separate untrusted certificate must remain untrusted so TLS-refusal tests remain meaningful. Certificates and private fixture keys are generated under the ignored `test-results` directory and are never committed or bundled. The tests do not use `ignoreHTTPSErrors`, disable certificate verification, or disable the Windows sandbox.
+Only `fixture.cer` is trusted. **Never import `untrusted.pem` or a certificate derived from it**; that separate fixture must remain untrusted so TLS-refusal tests remain meaningful. Certificates and private fixture keys are generated under the ignored `tmp/test-certificates` directory, outside the test-output directory that Playwright clears at startup and are never committed or bundled. The tests do not use `ignoreHTTPSErrors`, disable certificate verification, or disable the Windows sandbox. Microsoft documents the machine-store default and `-addstore` operation in the [certutil reference](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/certutil).
 
 The suite exercises JavaScript, Fetch, cookies, local storage, IndexedDB, cache, service workers, profile separation/restart, mobile/tablet emulation, controlled popups, QA navigation stages, 1/5/10/15/20 live sessions, every selectable count, wrong-country proxies, timeouts, empty pool, dropped proxies, certificate rejection, forbidden destinations, HTTP 403/429, cancellation, pause/resume, and renderer recovery. UI tests use the shipped renderer controls and native view bounds.
 

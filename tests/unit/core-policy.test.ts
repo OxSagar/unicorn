@@ -123,6 +123,24 @@ describe('URL imports and distribution', () => {
       }).map((job) => job.browserId),
     ).toEqual([2, 1]);
   });
+  it('uses measured renderer load alongside queue depth when balancing', () => {
+    expect(
+      distribute({
+        urls: ['https://a.example', 'https://b.example'],
+        ids: [1, 2],
+        mode: 'balanced',
+        resourceLoads: { 1: 3, 2: 0 },
+      }).map((job) => job.browserId),
+    ).toEqual([2, 2]);
+    expect(
+      distribute({
+        urls: ['https://a.example'],
+        ids: [1, 2],
+        mode: 'balanced',
+        resourceLoads: { 1: Number.NaN, 2: -1 },
+      })[0]?.browserId,
+    ).toBe(1);
+  });
   it('requires explicit manual targets within selected browsers', () => {
     expect(
       distribute({ urls: ['https://a.example'], ids: [1, 2], mode: 'manual', manual: { '0': 2 } })[0]

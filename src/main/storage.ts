@@ -23,6 +23,7 @@ export interface StoredData {
   jobs: TestJob[];
   scheduleTemplates: Array<{ browserId: number; url: string }>;
   budget?: BudgetSnapshot;
+  requestBudget?: BudgetSnapshot;
   totals: { completed: number; failed: number; navigations: number; jsErrors: number; networkErrors: number };
   nextRunAt: number | null;
 }
@@ -189,6 +190,7 @@ export class LocalStore {
       value.jobs = restoreJobs(parsed.jobs, settings);
       value.scheduleTemplates = restoreTemplates(parsed.scheduleTemplates, settings);
       value.budget = restoreBudget(parsed.budget);
+      value.requestBudget = restoreBudget(parsed.requestBudget);
       const totals = parsed.totals;
       const fields = ['completed', 'failed', 'navigations', 'jsErrors', 'networkErrors'] as const;
       if (

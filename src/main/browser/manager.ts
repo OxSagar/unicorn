@@ -24,6 +24,7 @@ import { canTransition, transition } from '../core/state';
 import { validateDevice } from '../core/validation';
 import { SessionGate } from '../network/session-gate';
 import { isRetryableTransportError } from '../network/transport-error';
+import { SiteRestrictionError } from '../network/site-restriction';
 import { CHALLENGE_MESSAGE, detectChallenge } from '../qa/challenge';
 import { RunControl } from '../qa/control';
 import { runStages } from '../qa/stages';
@@ -56,6 +57,7 @@ export interface BrowserManagerOptions {
   log: (level: ActivityEvent['level'], category: string, message: string, browserId?: number) => void;
   changed: () => void;
   navigationAllowed?: (url: string) => void;
+  requestAllowed?: (url: string) => void;
   profileData?: { load(id: number): ProfileData; save(id: number, data: ProfileData): void };
   diagnosticsDir?: string;
   emergencyStop?: () => void;
@@ -152,6 +154,7 @@ export class BrowserManager {
     });
     const holder: { entry?: Entry } = {};
     const gate = new SessionGate(ses, {
+      approveRequest: (url) => this.options.requestAllowed?.(url),
       approveNavigation: (url, mainFrame) => {
         assertApproved(url, this.options.settings());
         if (mainFrame) this.options.navigationAllowed?.(url);
@@ -164,16 +167,20 @@ export class BrowserManager {
         this.log(entry, 'warn', 'network', message);
         this.changed();
       },
-      onRestricted: (status, _url) => {
+      onRestricted: (status, url) => {
         const entry = holder.entry;
         if (!entry || entry.closing) return;
-        entry.restricted = new Error(
-          `HTTP ${status}: testing paused; proxy rotation will not bypass this response`,
+        this.restrict(
+          entry,
+          new SiteRestrictionError(
+            `HTTP ${status}: testing paused; proxy rotation will not bypass this response`,
+            url,
+          ),
         );
-        entry.snapshot.lastError = entry.restricted.message;
-        entry.abort?.abort(entry.restricted);
-        this.log(entry, 'warn', 'authorization', entry.restricted.message);
-        void gate.block().catch((error: unknown) => this.log(entry, 'error', 'network', String(error)));
+      },
+      onPolicyRestricted: (error) => {
+        const entry = holder.entry;
+        if (entry && !entry.closing) this.restrict(entry, error);
       },
     });
     await gate.block();
@@ -249,26 +256,31 @@ export class BrowserManager {
     );
   }
 
-  private newView(ses: Session): WebContentsView {
+  private remotePreferences(ses: Session): Electron.WebPreferences {
+    return {
+      session: ses,
+      nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
+      nodeIntegrationInWorker: false,
+      contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      javascript: true,
+      webviewTag: false,
+      plugins: false,
+      spellcheck: false,
+      backgroundThrottling: false,
+      safeDialogs: true,
+      safeDialogsMessage: 'Repeated dialogs from this website are being suppressed.',
+      navigateOnDragDrop: false,
+    };
+  }
+
+  private newView(ses: Session, options: Electron.WebContentsViewConstructorOptions = {}): WebContentsView {
     const view = new WebContentsView({
-      webPreferences: {
-        session: ses,
-        nodeIntegration: false,
-        nodeIntegrationInSubFrames: false,
-        nodeIntegrationInWorker: false,
-        contextIsolation: true,
-        sandbox: true,
-        webSecurity: true,
-        allowRunningInsecureContent: false,
-        javascript: true,
-        webviewTag: false,
-        plugins: false,
-        spellcheck: false,
-        backgroundThrottling: false,
-        safeDialogs: true,
-        safeDialogsMessage: 'Repeated dialogs from this website are being suppressed.',
-        navigateOnDragDrop: false,
-      },
+      ...options,
+      webPreferences: this.remotePreferences(ses),
     });
     view.setBounds({ x: 0, y: 0, width: 800, height: 600 });
     view.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
@@ -391,21 +403,49 @@ export class BrowserManager {
         this.log(entry, 'info', 'popup', 'Approved popup requested');
         return {
           action: 'allow',
-          createWindow: () => {
-            const popup = this.newView(entry.session);
+          // These preferences are applied before Chromium creates the child.
+          // Adopting a WebContents later cannot change its initial privileges.
+          overrideBrowserWindowOptions: { webPreferences: this.remotePreferences(entry.session) },
+          createWindow: (options) => {
+            // Electron supplies its existing child in options.webContents. Creating
+            // a different WebContents here breaks the native window.open handshake.
+            const popup = this.newView(entry.session, options);
+            const childContents = popup.webContents;
+            const popupId = childContents.id;
             this.options.window.contentView.addChildView(popup);
             popup.setVisible(false);
-            entry.children.set(popup.webContents.id, popup);
-            this.wireContents(entry, popup.webContents, true);
-            void applyDevice(popup.webContents, entry.snapshot.device).catch((error: unknown) =>
-              this.log(entry, 'warn', 'device', String(error)),
-            );
-            popup.webContents.once('destroyed', () => {
-              entry.children.delete(popup.webContents.id);
+            entry.children.set(popupId, popup);
+            this.wireContents(entry, childContents, true);
+            // CDP attachment during the synchronous creation callback can wait on
+            // the same renderer that is waiting for window.open to return.
+            childContents.once('dom-ready', () => {
+              setImmediate(() => {
+                if (entry.closing || childContents.isDestroyed() || !entry.children.has(popupId)) return;
+                void applyDevice(childContents, entry.snapshot.device).catch((error: unknown) =>
+                  this.log(entry, 'warn', 'device', String(error)),
+                );
+              });
+            });
+            childContents.once('destroyed', () => {
+              entry.children.delete(popupId);
+              if (entry.inspectedPopup === popupId) entry.inspectedPopup = undefined;
               this.syncPopups(entry);
             });
             this.syncPopups(entry);
-            return popup.webContents;
+            // Chromium can defer child creation for a background tab. In that
+            // case there is no supplied guest to perform its initial navigation.
+            if (!(options as Electron.WebContentsViewConstructorOptions).webContents)
+              setImmediate(() => {
+                if (entry.closing || childContents.isDestroyed() || !entry.gate.isEnabled) return;
+                void withDeadline(
+                  childContents.loadURL(details.url, {
+                    httpReferrer: details.referrer,
+                    postData: details.postBody?.data,
+                  }),
+                  this.options.settings().timings.navigationTimeoutMs,
+                ).catch((error: unknown) => this.log(entry, 'warn', 'popup', String(error)));
+              });
+            return childContents;
           },
         };
       } catch (error) {
@@ -574,15 +614,20 @@ export class BrowserManager {
     await control.checkpoint();
     if (entry.restricted) throw entry.restricted;
     if (!(await detectChallenge(entry.view.webContents, control.signal))) return;
-    entry.restricted = new Error(CHALLENGE_MESSAGE);
-    entry.snapshot.lastError = CHALLENGE_MESSAGE;
+    this.restrict(entry, new SiteRestrictionError(CHALLENGE_MESSAGE, entry.view.webContents.getURL()));
+    throw entry.restricted;
+  }
+
+  private restrict(entry: Entry, error: SiteRestrictionError): void {
+    entry.restricted = error;
+    entry.snapshot.lastError = error.message;
     entry.snapshot.stage = 'Manual review required';
-    this.log(entry, 'warn', 'authorization', CHALLENGE_MESSAGE);
+    this.log(entry, 'warn', 'authorization', error.message);
     // block() disables requests synchronously, including background workers and popup traffic.
     void entry.gate.block().catch((error: unknown) => this.log(entry, 'error', 'network', String(error)));
-    entry.abort?.abort(entry.restricted);
+    entry.abort?.abort(error);
+    if (canTransition(entry.snapshot.state, 'ERROR')) this.move(entry, 'ERROR');
     this.changed();
-    throw entry.restricted;
   }
 
   private operation(
@@ -620,13 +665,17 @@ export class BrowserManager {
           canTransition(entry.snapshot.state, 'ERROR')
         )
           this.move(entry, abort.signal.aborted && !entry.restricted ? 'STOPPED' : 'ERROR');
-        await this.lockNetwork(entry);
+        await this.lockNetwork(entry).catch((cleanupError: unknown) => {
+          this.log(entry, 'error', 'network', `Network cleanup also failed: ${String(cleanupError)}`);
+        });
         throw error;
       } finally {
         entry.snapshot.elapsedMs = entry.snapshot.startedAt ? Date.now() - entry.snapshot.startedAt : 0;
         entry.snapshot.startedAt = undefined;
         entry.session.flushStorageData();
-        await entry.session.cookies.flushStore().catch(() => undefined);
+        await withDeadline(entry.session.cookies.flushStore(), 8000).catch((error: unknown) => {
+          this.log(entry, 'error', 'storage', `Cookie flush did not complete: ${String(error)}`);
+        });
         this.save(entry);
         if (entry.abort === abort) {
           entry.control = undefined;
@@ -695,13 +744,16 @@ export class BrowserManager {
   }
 
   private async lockNetwork(entry: Entry, failure?: string): Promise<void> {
-    await entry.gate.block();
-    for (const item of entry.downloads) item.cancel();
-    if (!entry.view.webContents.isDestroyed()) entry.view.webContents.stop();
-    for (const child of entry.children.values())
-      if (!child.webContents.isDestroyed()) child.webContents.stop();
-    await this.options.proxies.release(entry.snapshot.id, failure);
-    entry.snapshot.proxy = undefined;
+    try {
+      await entry.gate.block();
+    } finally {
+      for (const item of entry.downloads) item.cancel();
+      if (!entry.view.webContents.isDestroyed()) entry.view.webContents.stop();
+      for (const child of entry.children.values())
+        if (!child.webContents.isDestroyed()) child.webContents.stop();
+      await this.options.proxies.release(entry.snapshot.id, failure);
+      entry.snapshot.proxy = undefined;
+    }
   }
 
   async pause(id: number): Promise<void> {
@@ -728,13 +780,19 @@ export class BrowserManager {
   async stop(id: number): Promise<void> {
     const entry = this.entry(id);
     entry.abort?.abort(new Error('Stopped by user'));
-    await entry.gate.block();
+    let failure: unknown;
+    await entry.gate.block().catch((error: unknown) => {
+      failure = error;
+    });
     await entry.active?.catch(() => undefined);
-    await this.lockNetwork(entry);
+    await this.lockNetwork(entry).catch((error: unknown) => {
+      failure ??= error;
+    });
     this.closePopups(entry);
     this.move(entry, 'STOPPED');
     entry.snapshot.stage = 'Stopped';
     entry.snapshot.loading = false;
+    if (failure) throw failure;
   }
 
   async action(id: number, action: BrowserAction): Promise<void> {
@@ -791,15 +849,16 @@ export class BrowserManager {
     const entry = this.entry(id);
     if (action === 'storage') {
       const directory = entry.session.storagePath;
-      if (!directory) return entry.session.getCacheSize();
-      return directoryBytes(directory);
+      if (!directory) return withDeadline(entry.session.getCacheSize(), 8000);
+      return withDeadline(directoryBytes(directory), 8000);
     }
     await this.stop(id);
     const previousUrl = entry.snapshot.url;
     if (action === 'cookies' || action === 'reset')
       await withDeadline(entry.view.webContents.loadURL('about:blank'), 8000);
-    if (action === 'cache' || action === 'reset') await entry.session.clearCache();
-    if (action === 'cookies') await entry.session.clearStorageData({ storages: ['cookies'] });
+    if (action === 'cache' || action === 'reset') await withDeadline(entry.session.clearCache(), 8000);
+    if (action === 'cookies')
+      await withDeadline(entry.session.clearStorageData({ storages: ['cookies'] }), 8000);
     if (action === 'history' || action === 'reset') {
       entry.snapshot.history = [];
       entry.view.webContents.navigationHistory.clear();
@@ -809,8 +868,8 @@ export class BrowserManager {
       entry.session.setPermissionCheckHandler(() => false);
     }
     if (action === 'reset') {
-      await entry.session.clearStorageData();
-      await entry.session.clearAuthCache();
+      await withDeadline(entry.session.clearStorageData(), 8000);
+      await withDeadline(entry.session.clearAuthCache(), 8000);
       await applyDevice(entry.view.webContents, DEVICES.desktop);
       entry.snapshot.device = { ...DEVICES.desktop };
       entry.snapshot.url = '';
@@ -829,10 +888,11 @@ export class BrowserManager {
     const popup = entry.children.get(popupId);
     if (!popup) throw new Error('Popup is no longer available');
     if (action === 'close') {
-      this.options.window.contentView.removeChildView(popup);
-      popup.webContents.close({ waitForBeforeUnload: false });
+      const contents = popup.webContents;
       entry.children.delete(popupId);
       if (entry.inspectedPopup === popupId) entry.inspectedPopup = undefined;
+      this.options.window.contentView.removeChildView(popup);
+      if (!contents.isDestroyed()) contents.close({ waitForBeforeUnload: false });
     } else entry.inspectedPopup = entry.inspectedPopup === popupId ? undefined : popupId;
     if (entry.bounds)
       this.layout([...this.entries.values()].flatMap((item) => (item.bounds ? [item.bounds] : [])));
@@ -840,12 +900,13 @@ export class BrowserManager {
   }
 
   private closePopups(entry: Entry): void {
-    for (const popup of entry.children.values()) {
+    const popups = [...entry.children.values()];
+    entry.children.clear();
+    entry.inspectedPopup = undefined;
+    for (const popup of popups) {
       this.options.window.contentView.removeChildView(popup);
       if (!popup.webContents.isDestroyed()) popup.webContents.close({ waitForBeforeUnload: false });
     }
-    entry.children.clear();
-    entry.inspectedPopup = undefined;
     this.syncPopups(entry);
     if (entry.bounds) entry.view.setVisible(entry.bounds.visible);
   }
@@ -857,7 +918,7 @@ export class BrowserManager {
       ...data,
       partition: `persist:unicorn-browser-${String(id).padStart(2, '0')}`,
       proxyEnabled: entry.gate.isEnabled,
-      proxyResolution: await entry.session.resolveProxy('https://unicorn.invalid/'),
+      proxyResolution: await withDeadline(entry.session.resolveProxy('https://unicorn.invalid/'), 8000),
       webRtcPolicy: entry.view.webContents.getWebRTCIPHandlingPolicy(),
     };
   }
@@ -915,11 +976,16 @@ export class BrowserManager {
 
   private async close(id: number): Promise<void> {
     const entry = this.entry(id);
-    await this.stop(id);
+    let failure: unknown;
+    await this.stop(id).catch((error: unknown) => {
+      failure = error;
+    });
     entry.closing = true;
     this.save(entry);
     entry.session.flushStorageData();
-    await entry.session.cookies.flushStore();
+    await withDeadline(entry.session.cookies.flushStore(), 8000).catch((error: unknown) => {
+      failure ??= error;
+    });
     entry.gate.dispose();
     entry.session.removeAllListeners('will-download');
     this.options.window.contentView.removeChildView(entry.view);
@@ -927,12 +993,21 @@ export class BrowserManager {
     this.entries.delete(id);
     this.log(entry, 'info', 'browser', 'Browser closed; persistent profile retained');
     this.changed();
+    if (failure) throw failure;
   }
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     await this.creating.catch(() => undefined);
-    await Promise.all([...this.entries.keys()].map((id) => this.close(id)));
+    const results = await Promise.allSettled([...this.entries.keys()].map((id) => this.close(id)));
+    const failures = results.filter(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (failures.length)
+      throw new AggregateError(
+        failures.map((failure) => failure.reason),
+        'Browser shutdown cleanup failed',
+      );
   }
 }
 

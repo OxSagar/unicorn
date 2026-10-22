@@ -18,7 +18,7 @@ Windows release assets include an NSIS installer, a portable ZIP, and `SHA256SUM
 - Blocks page networking before proxy assignment and after pause, stop, or failure. Proxy configuration contains no direct fallback and removes the implicit loopback bypass.
 - Imports TXT/CSV URLs and distributes them using same-URL, round-robin, balanced, or manual assignment, with editable queue review before starting.
 - Runs bounded landing-page, internal-link, and approved external-link QA stages with asynchronous waits, scrolling, console/resource diagnostics, screenshots, and cancellation.
-- Supports schedules, daily navigation limits, emergency stop, local logs/results export, performance measurements, tray controls, and optional start at login.
+- Supports schedules, daily navigation/request quotas, emergency stop, local logs/results export, performance measurements, tray controls, and optional start at login.
 
 ## First run
 
@@ -64,6 +64,8 @@ Application source is TypeScript; the UI is React/Vite. Settings, queue state, b
 - [Security and network boundaries](docs/security.md)
 - [Proxy provider contract](docs/proxy-contract.md)
 - [Testing and evidence](docs/testing.md)
+- [Requirement acceptance matrix](docs/acceptance.md)
+- [Dependency audit assessment](docs/dependency-audit.md)
 - [Performance and soak testing](docs/performance.md)
 - [User guide](docs/user-guide.md)
 - [Release notes](docs/release-notes.md)

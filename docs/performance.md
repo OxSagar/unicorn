@@ -4,7 +4,9 @@
 
 Unicorn shares one Electron runtime and creates separate persistent Chromium sessions and renderer views. The renderer UI subscribes to coalesced snapshots. Browser views are reused, remote JavaScript stays enabled, background throttling is disabled for accurate timed QA, lists are bounded/paginated, and screenshot capture is limited to stage boundaries.
 
-The application samples actual Electron process CPU and working-set memory every two seconds. CPU is the sum of Electron's process CPU percentages; the measurement is not a page-view metric. Memory is the summed process working set, so shared operating-system pages can be counted more than once. The resource screen also shows system free/total memory and process count.
+The application samples actual Electron process CPU and working-set memory every two seconds. CPU is the sum of Electron's process CPU percentages; the measurement is not a page-view metric. Memory is the summed process working set, so shared operating-system pages can be counted more than once. The resource screen also shows system free/total memory and process count. Every sample increments a heartbeat counter and measures the monotonic delay beyond the two-second polling interval; current/peak delay and the last heartbeat time are visible. A bounded heartbeat log is written once per minute. A sampling gap includes main-process stalls and system suspension; this telemetry does not replace an external process supervisor.
+
+Balanced assignment scores each selected profile using pending/running job count plus its current renderer CPU percentage divided by 25 and working-set MB divided by 512. This documented heuristic defers assignment toward less busy renderers; it does not migrate existing jobs or predict arbitrary page cost.
 
 New QA jobs wait when the configured memory budget is exceeded. Existing browser profiles remain intact. Proxy validation uses at most four parallel Chromium validation sessions. Each browser has bounded retries and finite navigation/operation timeouts. Captures, histories, queues, and logs have retention/size limits.
 

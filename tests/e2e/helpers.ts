@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { AppCommand, AppSettings, AppSnapshot, CommandResult } from '../../src/shared/types';
 import { DEFAULT_SETTINGS } from '../../src/shared/defaults';
 import type { BrowserFixtures } from '../fixtures/servers';
+import { closeElectronApplication } from './close-electron';
 
 export interface Harness {
   app: ElectronApplication;
@@ -85,7 +86,9 @@ export async function launchUnicorn(
     );
     return { app, page, directory, configPath };
   } catch (error) {
-    await app.close().catch(() => app.process().kill());
+    await closeElectronApplication(app).catch((cleanupError) => {
+      console.error('Electron startup cleanup also failed:', cleanupError);
+    });
     throw error;
   }
 }
@@ -108,5 +111,5 @@ export function browserEvaluate<T>(harness: Harness, id: number, source: string)
 }
 export async function closeHarness(harness: Harness | undefined): Promise<void> {
   if (!harness) return;
-  await harness.app.close();
+  await closeElectronApplication(harness.app);
 }

@@ -1,7 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Session } from 'electron';
 import { BLOCKED_PROXY, proxyRule, SessionGate } from '../../src/main/network/session-gate';
 import type { ProxyRecord } from '../../src/shared/types';
+import { SiteRestrictionError } from '../../src/main/network/site-restriction';
+
+afterEach(() => vi.useRealTimers());
 
 const proxy: ProxyRecord = {
   id: 'test',
@@ -35,9 +38,10 @@ function setup() {
     setDisplayMediaRequestHandler: vi.fn(),
     setSpellCheckerEnabled: vi.fn(),
     setProxy: vi.fn(
-      async (_config: { mode: string; proxyRules: string; proxyBypassRules: string }) => undefined,
+      async (_config: { mode: string; proxyRules: string; proxyBypassRules: string }): Promise<void> =>
+        undefined,
     ),
-    closeAllConnections: vi.fn(async () => undefined),
+    closeAllConnections: vi.fn(async (): Promise<void> => undefined),
     resolveProxy: vi.fn(async () => 'PROXY 203.0.113.7:8080'),
     webRequest: {
       onBeforeRequest: vi.fn((_filter: object, handler: Request) => {
@@ -50,7 +54,13 @@ function setup() {
       onErrorOccurred: vi.fn(),
     },
   };
-  const hooks = { approveNavigation: vi.fn(), onFailure: vi.fn(), onRestricted: vi.fn() };
+  const hooks = {
+    approveRequest: vi.fn(),
+    approveNavigation: vi.fn(),
+    onFailure: vi.fn(),
+    onRestricted: vi.fn(),
+    onPolicyRestricted: vi.fn(),
+  };
   const gate = new SessionGate(fake as unknown as Session, hooks);
   return {
     fake,
@@ -121,6 +131,53 @@ describe('session network gate', () => {
     await expect(gate.assign(proxy, abort.signal, true)).rejects.toThrow('Cancelled');
     expect(gate.isEnabled).toBe(false);
   });
+  it('permanently rejects the same session after a timed-out setProxy completes late, including after reopening', async () => {
+    vi.useFakeTimers();
+    const { gate, fake, hooks, request } = setup();
+    let complete!: () => void;
+    fake.setProxy.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const assignment = gate.assign(proxy, new AbortController().signal, true);
+    const failure = expect(assignment).rejects.toThrow('timed out after 8000 ms');
+    await vi.advanceTimersByTimeAsync(8000);
+    await failure;
+    expect(gate.isEnabled).toBe(false);
+    await expect(gate.assign(proxy, new AbortController().signal, true)).rejects.toThrow('restart Unicorn');
+    gate.dispose();
+    const reopened = new SessionGate(fake as unknown as Session, hooks);
+    await expect(reopened.assign(proxy, new AbortController().signal, true)).rejects.toThrow(
+      'restart Unicorn',
+    );
+    complete();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reopened.isEnabled).toBe(false);
+    expect(await request('https://authorized.test/')).toEqual({ cancel: true });
+    expect(fake.setProxy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it('poisons an unsettled native mutation when an operation is aborted', async () => {
+    const { gate, fake } = setup();
+    const abort = new AbortController();
+    let complete!: () => void;
+    fake.closeAllConnections.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const assignment = gate.assign(proxy, abort.signal, false);
+    const failure = expect(assignment).rejects.toThrow('Stopped during native configuration');
+    await vi.waitFor(() => expect(complete).toBeTypeOf('function'));
+    abort.abort(new Error('Stopped during native configuration'));
+    await failure;
+    complete();
+    await expect(gate.assign(proxy, new AbortController().signal, false)).rejects.toThrow('restart Unicorn');
+    expect(fake.setProxy).not.toHaveBeenCalled();
+  });
   it('checks top-level and child-frame scope and rejects local-file access', async () => {
     const { gate, hooks, request } = setup();
     await gate.assign(proxy, new AbortController().signal, false);
@@ -169,4 +226,44 @@ describe('session network gate', () => {
       'socks5://[2001:4860:4860::8888]:8080',
     );
   });
+  it('checks the request budget for manual subresources and WebSockets before navigation approval', async () => {
+    const { gate, hooks, request } = setup();
+    const order: string[] = [];
+    hooks.approveRequest.mockImplementation(() => {
+      order.push('request');
+    });
+    hooks.approveNavigation.mockImplementation(() => {
+      order.push('navigation');
+    });
+    await gate.assign(proxy, new AbortController().signal, false);
+    expect(await request('https://authorized.test/')).toEqual({});
+    expect(order).toEqual(['request', 'navigation']);
+    expect(await request('https://assets.test/app.js', 'script')).toEqual({});
+    expect(await request('wss://assets.test/socket', 'webSocket')).toEqual({});
+    expect(hooks.approveRequest.mock.calls.map(([url]) => url)).toEqual([
+      'https://authorized.test/',
+      'https://assets.test/app.js',
+      'https://assets.test/socket',
+    ]);
+    expect(hooks.approveNavigation).toHaveBeenCalledTimes(1);
+  });
+  it.each(['approveRequest', 'approveNavigation'] as const)(
+    'preserves the exact policy error from %s and closes the entire gate',
+    async (hook) => {
+      const { gate, hooks, request } = setup();
+      const error = new SiteRestrictionError(
+        'Daily request limit reached for redirected.test',
+        'https://redirected.test/page',
+      );
+      hooks[hook].mockImplementation(() => {
+        throw error;
+      });
+      await gate.assign(proxy, new AbortController().signal, true);
+      expect(await request('https://redirected.test/page')).toEqual({ cancel: true });
+      expect(hooks.onPolicyRestricted).toHaveBeenCalledWith(error);
+      expect(error.restrictedHost).toBe('redirected.test');
+      expect(gate.isEnabled).toBe(false);
+      expect(await request('https://authorized.test/another-resource', 'script')).toEqual({ cancel: true });
+    },
+  );
 });

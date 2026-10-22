@@ -85,6 +85,8 @@ export interface AppSettings {
   authorizedDomains: string[];
   stagingConfirmed: boolean;
   dailyNavigationLimit: number;
+  dailyRequestLimit: number;
+  excludedLinkPatterns: string[];
   retryLimit: number;
   proxyTimeoutMs: number;
   proxyRefreshMinutes: number;
@@ -93,6 +95,7 @@ export interface AppSettings {
   closePopupsAfterRun: boolean;
   theme: 'dark' | 'light';
   closeToTray: boolean;
+  minimizeToTray: boolean;
   startAtLogin: boolean;
   resourceLimitMb: number;
   logRetentionDays: number;
@@ -121,6 +124,9 @@ export interface PerformanceSnapshot {
   processes: number;
   uptimeSeconds: number;
   sampledAt: number;
+  heartbeatCount: number;
+  eventLoopDelayMs: number;
+  peakEventLoopDelayMs: number;
 }
 export interface AppSnapshot {
   version: string;
@@ -178,6 +184,7 @@ export type AppCommand =
       allowDuplicates?: boolean;
     }
   | { type: 'job'; id: string; action: 'remove' }
+  | { type: 'edit-job'; id: string; url: string; browserId: number }
   | { type: 'clear-queue' }
   | { type: 'settings'; settings: AppSettings }
   | { type: 'refresh-proxies' }

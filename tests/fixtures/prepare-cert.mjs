@@ -2,7 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-const directory = resolve(process.argv[2] ?? 'test-results/certificates');
+// Keep inputs outside Playwright's output directory, which is cleared at startup.
+const directory = resolve(process.argv[2] ?? 'tmp/test-certificates');
 mkdirSync(directory, { recursive: true });
 const bundled = 'C:\\Program Files\\Git\\usr\\bin\\openssl.exe';
 const openssl = process.platform === 'win32' && existsSync(bundled) ? bundled : 'openssl';
@@ -60,4 +61,6 @@ execFileSync(
   { stdio: 'pipe' },
 );
 console.log(`Created local QA certificate: ${der}`);
-console.log('Windows CI must import fixture.cer into CurrentUser\\Root before HTTPS browser tests.');
+console.log(
+  'Windows HTTPS tests must trust only fixture.cer in the temporary LocalMachine\\Root store, then remove that exact certificate. Never trust untrusted.pem.',
+);

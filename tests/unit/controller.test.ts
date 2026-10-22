@@ -5,6 +5,7 @@ import { BrowserManager } from '../../src/main/browser/manager';
 import { ActivityLog, initialData, LocalStore, type StoredData } from '../../src/main/storage';
 import { DEVICES } from '../../src/shared/defaults';
 import type { AppCommand, BrowserSnapshot, TestJob } from '../../src/shared/types';
+import { SiteRestrictionError } from '../../src/main/network/site-restriction';
 
 vi.mock('electron', () => ({
   app: {
@@ -185,6 +186,8 @@ async function setup(data = state()) {
   return {
     controller,
     manager,
+    store,
+    logs,
     saved: () => structuredClone(saved),
     urls: () => manager.runQa.mock.calls.map(([, url]) => url),
     assign: async (id: number, urls: string[]) =>
@@ -209,6 +212,65 @@ afterEach(async () => {
 });
 
 describe('explicit queue runs and recurrence', () => {
+  it('preserves state and flushes logs when native shutdown reports a cleanup error', async () => {
+    const { controller, manager, store, logs, assign } = await setup();
+    await assign(1, [FIRST]);
+    manager.shutdown.mockRejectedValueOnce(new Error('Native cookies flush timed out'));
+    await expect(controller.shutdown()).rejects.toThrow(/cleanup errors/);
+    expect(store.save).toHaveBeenCalled();
+    expect(logs.flush).toHaveBeenCalled();
+    expect(vi.mocked(store.save).mock.calls.at(-1)?.[0].jobs[0]?.url).toBe(FIRST);
+  });
+  it('editing a reviewed pending assignment requires a new Start and updates its browser safely', async () => {
+    const { controller, manager, assign, urls } = await setup();
+    const held = manager.hold(FIRST);
+    await assign(1, [FIRST, SECOND]);
+    await controller.command({ type: 'browser', id: 1, action: 'start' });
+    const pending = controller.snapshot().jobs.find((job) => job.url === SECOND)!;
+    await controller.command({ type: 'edit-job', id: pending.id, url: OTHER, browserId: 2 });
+    held.resolve();
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+    const edited = controller.snapshot().jobs.find((job) => job.url === OTHER)!;
+    expect(edited).toMatchObject({ browserId: 2, status: 'pending' });
+    expect(edited.id).not.toBe(pending.id);
+    expect(urls()).toEqual([FIRST, FIRST]);
+    await controller.command({ type: 'browser', id: 2, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(urls()).toEqual([FIRST, FIRST, OTHER]);
+    await expect(
+      controller.command({ type: 'edit-job', id: edited.id, url: FIRST, browserId: 1 }),
+    ).rejects.toThrow(/pending/);
+  });
+
+  it('rejects unsafe, duplicate or closed-browser queue edits without changing the original job', async () => {
+    const { controller, assign } = await setup();
+    await assign(1, [FIRST, SECOND]);
+    const original = controller.snapshot().jobs[0]!;
+    await expect(
+      controller.command({ type: 'edit-job', id: original.id, url: 'https://outside.test/', browserId: 1 }),
+    ).rejects.toThrow(/scope/);
+    await expect(
+      controller.command({ type: 'edit-job', id: original.id, url: SECOND, browserId: 1 }),
+    ).rejects.toThrow(/already/);
+    await expect(
+      controller.command({ type: 'edit-job', id: original.id, url: OTHER, browserId: 3 }),
+    ).rejects.toThrow(/Reopen/);
+    expect(controller.snapshot().jobs[0]).toEqual(original);
+  });
+
+  it('counts page and subresource requests against one persisted per-host daily quota', async () => {
+    const data = state();
+    data.settings.dailyRequestLimit = 2;
+    await setup(data);
+    const options = vi.mocked(BrowserManager).mock.calls.at(-1)![0];
+    options.requestAllowed!('https://authorized.test/page');
+    options.requestAllowed!('https://authorized.test/asset.js');
+    expect(() => options.requestAllowed!('https://authorized.test/fetch')).toThrow(SiteRestrictionError);
+    expect(() => options.requestAllowed!('https://other.test/asset')).not.toThrow();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(data.requestBudget?.counts).toEqual({ 'authorized.test': 2, 'other.test': 1 });
+  });
+
   it('repeats only the selected current jobs, keeping historical and unstarted URLs out of the run', async () => {
     const data = state();
     const old = historicalJob('historic', 1, 'https://authorized.test/old-run');
@@ -427,6 +489,45 @@ describe('browser queue lifecycle', () => {
 });
 
 describe('failed jobs and restricted hosts', () => {
+  it('uses the actual restricted host after a redirect or external QA stage', async () => {
+    const { controller, manager, assign, urls } = await setup(state(3));
+    const blockedPending = 'https://other.test/pending';
+    await assign(2, [OTHER]);
+    await controller.command({ type: 'browser', id: 2, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    await assign(2, [blockedPending]);
+    await assign(3, [SECOND]);
+    await controller.command({ type: 'browser', id: 3, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    manager.failures.set(
+      FIRST,
+      new SiteRestrictionError('HTTP 403: testing requires manual review', 'https://other.test/restricted'),
+    );
+    await assign(1, [FIRST]);
+    await controller.command({ type: 'browser', id: 1, action: 'start' });
+    await vi.advanceTimersByTimeAsync(INTERVAL * 2);
+    expect(controller.snapshot().jobs.find((job) => job.url === blockedPending)?.status).toBe('cancelled');
+    expect(urls().filter((url) => url === OTHER)).toHaveLength(1);
+    expect(urls().filter((url) => url === FIRST)).toHaveLength(1);
+    expect(urls().filter((url) => url === SECOND)).toHaveLength(3);
+  });
+
+  it('stops another active browser already on the restricted host', async () => {
+    const { controller, manager, assign } = await setup();
+    manager.hold(OTHER);
+    await assign(2, [OTHER]);
+    await controller.command({ type: 'browser', id: 2, action: 'start' });
+    manager.failures.set(
+      FIRST,
+      new SiteRestrictionError('Challenge detected; manual review required', OTHER),
+    );
+    await assign(1, [FIRST]);
+    await controller.command({ type: 'browser', id: 1, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(manager.stop).toHaveBeenCalledWith(2);
+    expect(controller.snapshot().jobs.find((job) => job.url === OTHER)?.status).toBe('cancelled');
+  });
+
   it.each([
     'HTTP 401: testing paused; proxy rotation will not bypass this response',
     'HTTP 403: testing paused; proxy rotation will not bypass this response',

@@ -101,6 +101,14 @@ export default function PerformancePage({
             <dd>{Math.round(perf.totalMemoryMb).toLocaleString()} MB</dd>
             <dt>System memory available</dt>
             <dd>{Math.round(perf.freeMemoryMb).toLocaleString()} MB</dd>
+            <dt>Last heartbeat</dt>
+            <dd>{timeLabel(perf.sampledAt)}</dd>
+            <dt>Current sampling delay</dt>
+            <dd>{perf.eventLoopDelayMs.toFixed(1)} ms</dd>
+            <dt>Peak sampling delay</dt>
+            <dd>{perf.peakEventLoopDelayMs.toFixed(1)} ms</dd>
+            <dt>Heartbeat count</dt>
+            <dd>{perf.heartbeatCount.toLocaleString()}</dd>
             <dt>First visible sample</dt>
             <dd>{timeLabel(history[0]?.sampledAt)}</dd>
             <dt>Retained chart samples</dt>

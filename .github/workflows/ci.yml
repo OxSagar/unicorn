@@ -29,7 +29,10 @@ jobs:
       - run: npm run format:check
       - run: npm run lint
       - run: npm test
-      - run: npm audit --audit-level=high --fetch-retries=1 --fetch-timeout=30000
+      - name: Audit all dependencies with a high-severity release gate
+        run: npm audit --json --audit-level=high --fetch-retries=1 --fetch-timeout=30000 > test-results/dependency-audit.json
+      - name: Audit packaged production dependencies
+        run: npm audit --omit=dev --json --audit-level=low --fetch-retries=1 --fetch-timeout=30000 > test-results/production-audit.json
       - run: npm run build
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: always()
@@ -57,7 +60,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $certificatePath = (Resolve-Path 'test-results/certificates/fixture.cer').Path
+          $certificatePath = (Resolve-Path 'tmp/test-certificates/fixture.cer').Path
           $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
           if ($certificate.Subject -ne 'CN=Unicorn Local QA Fixture' -or $certificate.Issuer -ne $certificate.Subject) {
             throw 'The generated certificate is not the expected isolated fixture CA'
@@ -93,20 +96,37 @@ jobs:
       - name: Launch the packaged Windows executable
         run: npm run test:packaged
       - name: Verify installer installation and launch
+        timeout-minutes: 5
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          function Stop-SmokeProcessTree([System.Diagnostics.Process]$Target) {
+            if ($Target.HasExited) { return }
+            $cleanup = Start-Process -FilePath "$env:SystemRoot\System32\taskkill.exe" -ArgumentList @('/PID', "$($Target.Id)", '/T', '/F') -PassThru -NoNewWindow
+            if (!$cleanup.WaitForExit(10000)) { $cleanup.Kill() }
+          }
           $installer = Get-ChildItem release/Unicorn-Setup-*.exe | Select-Object -First 1
+          if (!$installer) { throw 'Installer executable is missing' }
           $destination = Join-Path $env:RUNNER_TEMP 'UnicornInstalled'
-          $process = Start-Process -FilePath $installer.FullName -ArgumentList "/S", "/D=$destination" -Wait -PassThru
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList "/S", "/D=$destination" -PassThru
+          if (!$process.WaitForExit(120000)) {
+            try { Stop-SmokeProcessTree $process } catch { Write-Warning "Installer cleanup also failed: $_" }
+            throw 'Installer timed out after 120 seconds'
+          }
           if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
           $exe = Join-Path $destination 'Unicorn.exe'
           if (!(Test-Path $exe)) { throw 'Installed executable is missing' }
           $report = Join-Path $env:GITHUB_WORKSPACE 'test-results/installed-smoke.json'
-          $process = Start-Process -FilePath $exe -ArgumentList "--smoke-output=$report" -PassThru
-          if (!$process.WaitForExit(60000)) { $process.Kill(); throw 'Installed app timed out' }
+          Remove-Item $report -Force -ErrorAction SilentlyContinue
+          $process = Start-Process -FilePath $exe -ArgumentList ('"--smoke-output={0}"' -f $report) -PassThru
+          if (!$process.WaitForExit(60000)) {
+            try { Stop-SmokeProcessTree $process } catch { Write-Warning "Installed app cleanup also failed: $_" }
+            throw 'Installed app timed out after 60 seconds'
+          }
           if ($process.ExitCode -ne 0) { throw 'Installed app failed' }
           $result = Get-Content $report | ConvertFrom-Json
-          if (!$result.windowReady -or !$result.sandbox -or !$result.contextIsolation) { throw 'Installed app security smoke check failed' }
+          $expectedVersion = (Get-Content package.json | ConvertFrom-Json).version
+          if (!$result.windowReady -or !$result.sandbox -or !$result.contextIsolation -or $result.platform -ne 'win32' -or $result.version -ne $expectedVersion -or $result.browsers -lt 1 -or $result.browsers -gt 20) { throw 'Installed app version/security smoke check failed' }
       - run: npm run checksums
       - name: Remove the temporary trusted certificate
         if: always()

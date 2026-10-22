@@ -96,6 +96,9 @@ async function start(): Promise<void> {
     if (controls.snapshot().settings.closeToTray && tray && !testEnabled) host.hide();
     else app.quit();
   });
+  host.on('minimize', () => {
+    if (controls.snapshot().settings.minimizeToTray && tray && !testEnabled) host.hide();
+  });
   await controls.initialize();
   await host.loadFile(path.join(__dirname, '../renderer/index.html'));
   host.show();

@@ -18,6 +18,8 @@ import { distribute, importUrls } from './core/distribution';
 import { inOperatingWindow } from './core/timing';
 import { validateSettings } from './core/validation';
 import { validateProxy } from './network/proxy-validator';
+import { SiteRestrictionError } from './network/site-restriction';
+import { withDeadline } from './browser/deadline';
 import { ActivityLog, LocalStore, type StoredData } from './storage';
 
 export interface TestConfiguration {
@@ -30,6 +32,7 @@ export class UnicornController {
   readonly manager: BrowserManager;
   readonly pool: ProxyPool;
   private budget: DomainBudget;
+  private requestBudget: DomainBudget;
   private active = new Map<number, Promise<void>>();
   private acceptedJobs = new Map<number, Set<string>>();
   private stopped = new Set<number>();
@@ -44,6 +47,8 @@ export class UnicornController {
   private lastFetchAttempt = 0;
   private providerRetryAt = 0;
   private lastResourceWarning = 0;
+  private lastHeartbeatMonotonicMs?: number;
+  private lastHeartbeatLogMonotonicMs?: number;
   private poolOptions = { uniqueExitIps: true, validationTtlMs: 30000, maxAttempts: 6 };
   private provider: AppSnapshot['provider'] = {
     lastFetchedAt: null,
@@ -59,6 +64,9 @@ export class UnicornController {
     processes: 0,
     uptimeSeconds: 0,
     sampledAt: 0,
+    heartbeatCount: 0,
+    eventLoopDelayMs: 0,
+    peakEventLoopDelayMs: 0,
   };
 
   constructor(
@@ -69,6 +77,7 @@ export class UnicornController {
     private test?: TestConfiguration,
   ) {
     this.budget = new DomainBudget(data.budget);
+    this.requestBudget = new DomainBudget(data.requestBudget);
     this.scheduleArmed = data.settings.schedule.enabled && data.settings.schedule.resumeAfterRestart;
     this.poolOptions.uniqueExitIps = data.settings.uniqueExitIps;
     this.pool = new ProxyPool(
@@ -81,11 +90,19 @@ export class UnicornController {
       settings: () => this.data.settings,
       proxies: {
         acquire: async (id, signal) => {
-          if (!this.pool.list().length && !test) await this.refreshProxies();
+          const reserve = this.pool
+            .list()
+            .filter(
+              (record) =>
+                record.assignedTo === undefined && ['available', 'unverified'].includes(record.status),
+            ).length;
+          if (!reserve && !this.pool.assigned(id)) await withDeadline(this.replenishProxies(), 20000, signal);
+          else if (reserve < Math.max(4, this.data.settings.browserCount)) void this.replenishProxies();
           return this.pool.acquire(id, signal);
         },
         release: (id, reason) => {
           this.pool.release(id, reason);
+          if (reason) void this.replenishProxies();
           this.changed();
         },
       },
@@ -104,7 +121,19 @@ export class UnicornController {
         );
       },
       navigationAllowed: (url) => {
-        this.budget.consume(url, this.data.settings.dailyNavigationLimit);
+        try {
+          this.budget.consume(url, this.data.settings.dailyNavigationLimit);
+        } catch (error) {
+          throw new SiteRestrictionError(error instanceof Error ? error.message : String(error), url);
+        }
+        this.persistSoon();
+      },
+      requestAllowed: (url) => {
+        try {
+          this.requestBudget.consume(url, this.data.settings.dailyRequestLimit);
+        } catch {
+          throw new SiteRestrictionError(`Daily request limit reached for ${new URL(url).hostname}`, url);
+        }
         this.persistSoon();
       },
       profileData: {
@@ -194,11 +223,18 @@ export class UnicornController {
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined;
       this.data.budget = this.budget.snapshot();
+      this.data.requestBudget = this.requestBudget.snapshot();
       void this.store.save(this.data).catch((error) => this.logs.add('error', 'storage', String(error)));
     }, 500);
   }
   private samplePerformance(): void {
     const metrics = app.getAppMetrics();
+    const monotonicNow = globalThis.performance.now();
+    const delay =
+      this.lastHeartbeatMonotonicMs === undefined
+        ? 0
+        : Math.max(0, monotonicNow - this.lastHeartbeatMonotonicMs - 2000);
+    this.lastHeartbeatMonotonicMs = monotonicNow;
     this.performance = {
       cpuPercent: Math.round(metrics.reduce((sum, item) => sum + item.cpu.percentCPUUsage, 0) * 10) / 10,
       memoryMb: Math.round(metrics.reduce((sum, item) => sum + item.memory.workingSetSize, 0) / 1024),
@@ -207,7 +243,19 @@ export class UnicornController {
       processes: metrics.length,
       uptimeSeconds: Math.floor(process.uptime()),
       sampledAt: Date.now(),
+      heartbeatCount: this.performance.heartbeatCount + 1,
+      eventLoopDelayMs: Math.round(delay * 10) / 10,
+      peakEventLoopDelayMs: Math.max(this.performance.peakEventLoopDelayMs, Math.round(delay * 10) / 10),
     };
+    if (this.lastHeartbeatLogMonotonicMs === undefined) this.lastHeartbeatLogMonotonicMs = monotonicNow;
+    if (monotonicNow - this.lastHeartbeatLogMonotonicMs >= 60000) {
+      this.lastHeartbeatLogMonotonicMs = monotonicNow;
+      this.logs.add(
+        'info',
+        'heartbeat',
+        `Application heartbeat ${this.performance.heartbeatCount}; sampling delay ${this.performance.eventLoopDelayMs} ms; peak ${this.performance.peakEventLoopDelayMs} ms; ${this.active.size} active QA jobs.`,
+      );
+    }
     if (
       this.performance.memoryMb > this.data.settings.resourceLimitMb &&
       Date.now() - this.lastResourceWarning > 60000
@@ -219,6 +267,20 @@ export class UnicornController {
         'Configured memory budget exceeded. New QA jobs will wait; existing profiles remain open.',
       );
     }
+  }
+
+  private canRefreshProxies(): boolean {
+    return (
+      !this.test &&
+      !this.closing &&
+      Date.now() >= this.providerRetryAt &&
+      Date.now() - this.lastFetchAttempt >= 60000
+    );
+  }
+
+  private replenishProxies(): Promise<void> {
+    if (this.refreshPromise) return this.refreshPromise;
+    return this.canRefreshProxies() ? this.refreshProxies() : Promise.resolve();
   }
 
   async refreshProxies(): Promise<void> {
@@ -233,22 +295,26 @@ export class UnicornController {
     this.provider.fetching = true;
     this.changed();
     this.refreshPromise = (async () => {
+      const request = new AbortController();
+      const deadline = setTimeout(
+        () => request.abort(new Error('ProxyScrape request timed out after 20 seconds')),
+        20000,
+      );
       try {
-        const response = await fetch(
-          proxyScrapeUrl({ timeoutMs: this.data.settings.proxyTimeoutMs, limit: 2000 }),
-          {
-            signal: AbortSignal.timeout(20000),
+        const response = await withDeadline(
+          fetch(proxyScrapeUrl({ timeoutMs: this.data.settings.proxyTimeoutMs, limit: 2000 }), {
+            signal: request.signal,
             headers: { Accept: 'application/json', 'User-Agent': 'Unicorn-QA/1.0' },
             redirect: 'error',
-          },
+          }),
+          21000,
+          request.signal,
         );
         if (response.status === 429) {
+          const retry = response.headers.get('retry-after')?.trim() ?? '60';
+          const delay = /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
           this.providerRetryAt =
-            Date.now() +
-            Math.max(
-              60000,
-              Math.min(3600000, Number(response.headers.get('retry-after') ?? 60) * 1000 || 60000),
-            );
+            Date.now() + Math.max(60000, Math.min(3600000, Number.isFinite(delay) ? delay : 60000));
           throw new Error('ProxyScrape rate limit reached; provider cooldown applied.');
         }
         if (!response.ok) throw new Error(`ProxyScrape returned HTTP ${response.status}`);
@@ -257,11 +323,12 @@ export class UnicornController {
         const chunks: Uint8Array[] = [];
         let length = 0;
         for (;;) {
-          const part = await reader.read();
+          const part = await withDeadline(reader.read(), 21000, request.signal);
           if (part.done) break;
           length += part.value.byteLength;
           if (length > 4 * 1024 * 1024) {
-            await reader.cancel();
+            request.abort(new Error('ProxyScrape response exceeds 4 MB'));
+            await withDeadline(reader.cancel(), 1000).catch(() => undefined);
             throw new Error('ProxyScrape response exceeds 4 MB');
           }
           chunks.push(part.value);
@@ -289,6 +356,8 @@ export class UnicornController {
         this.provider.error = String(error);
         this.logs.add('warn', 'proxy', String(error));
       } finally {
+        clearTimeout(deadline);
+        request.abort();
         this.provider.fetching = false;
         this.refreshPromise = undefined;
         this.changed();
@@ -385,8 +454,12 @@ export class UnicornController {
           this.data.scheduleTemplates = this.data.scheduleTemplates.filter(
             (template) => template.browserId !== id || template.url !== job.url,
           );
-          if (/HTTP (401|403|429)|challenge detected|rate.?limit|daily navigation limit/i.test(job.error)) {
-            const host = new URL(job.url).hostname;
+          if (
+            error instanceof SiteRestrictionError ||
+            /HTTP (401|403|429)|challenge detected|rate.?limit|daily navigation limit/i.test(job.error)
+          ) {
+            const host =
+              error instanceof SiteRestrictionError ? error.restrictedHost : new URL(job.url).hostname;
             this.data.scheduleTemplates = this.data.scheduleTemplates.filter(
               (template) => new URL(template.url).hostname !== host,
             );
@@ -396,6 +469,22 @@ export class UnicornController {
                 pending.finishedAt = Date.now();
                 pending.error = 'Host requires manual review after an access restriction.';
               }
+            for (const browser of this.manager.snapshots()) {
+              if (browser.id === id || !this.active.has(browser.id)) continue;
+              let currentHost: string;
+              try {
+                currentHost = new URL(browser.url).hostname;
+              } catch {
+                continue;
+              }
+              if (currentHost !== host) continue;
+              this.stopped.add(browser.id);
+              this.pausedIds.add(browser.id);
+              this.acceptedJobs.delete(browser.id);
+              void this.manager
+                .stop(browser.id)
+                .catch((failure) => this.logs.add('error', 'stop', String(failure), browser.id));
+            }
           }
         }
         job.finishedAt = Date.now();
@@ -408,9 +497,15 @@ export class UnicornController {
     if (this.closing || this.paused) return;
     if (
       !this.test &&
-      Date.now() - (this.provider.lastFetchedAt ?? 0) > this.data.settings.proxyRefreshMinutes * 60000
+      (Date.now() - (this.provider.lastFetchedAt ?? 0) > this.data.settings.proxyRefreshMinutes * 60000 ||
+        this.pool
+          .list()
+          .filter(
+            (record) =>
+              record.assignedTo === undefined && ['available', 'unverified'].includes(record.status),
+          ).length < Math.max(4, this.data.settings.browserCount))
     )
-      void this.refreshProxies();
+      void this.replenishProxies();
     if (!this.scheduleArmed || this.active.size || !this.data.nextRunAt || Date.now() < this.data.nextRunAt)
       return;
     const schedule = this.data.settings.schedule;
@@ -455,6 +550,7 @@ export class UnicornController {
     this.data.nextRunAt = Date.now() + schedule.intervalMinutes * 60000;
     this.persistSoon();
     if (!accepted.size) return;
+    void this.replenishProxies();
     try {
       this.begin([...ids], false, accepted);
     } catch (error) {
@@ -562,9 +658,20 @@ export class UnicornController {
         if (command.ids.some((id) => !open.has(id)))
           throw new Error('Reopen the selected browser before assigning a URL');
         for (const url of command.urls) assertApproved(url, this.data.settings);
+        const resourceLoads: Record<number, number> = {};
+        if (command.mode === 'balanced') {
+          const metrics = new Map(app.getAppMetrics().map((item) => [item.pid, item]));
+          for (const id of command.ids) {
+            const sample = metrics.get(this.manager.getWebContents(id).getOSProcessId());
+            if (sample)
+              resourceLoads[id] =
+                sample.cpu.percentCPUUsage / 25 + sample.memory.workingSetSize / (512 * 1024);
+          }
+        }
         const jobs = distribute({
           ...command,
           existing: this.data.jobs,
+          resourceLoads,
           allowLocalhost: this.data.settings.allowLocalhost,
         });
         if (
@@ -578,6 +685,34 @@ export class UnicornController {
           ...jobs,
         ];
         message = `${jobs.length} test jobs assigned. Review the queue, then start.`;
+        break;
+      }
+      case 'edit-job': {
+        const job = this.data.jobs.find((item) => item.id === command.id);
+        if (!job || job.status !== 'pending') throw new Error('Only a pending job can be edited.');
+        if (!this.manager.snapshots().some((browser) => browser.id === command.browserId))
+          throw new Error('Reopen the destination browser before editing its assignment.');
+        const url = assertApproved(command.url, this.data.settings);
+        if (
+          this.data.jobs.some(
+            (item) =>
+              item.id !== job.id &&
+              ['pending', 'running'].includes(item.status) &&
+              item.browserId === command.browserId &&
+              item.url === url,
+          )
+        )
+          throw new Error('This browser already has that URL in its active queue.');
+        this.data.scheduleTemplates = this.data.scheduleTemplates.filter(
+          (item) => item.browserId !== job.browserId || item.url !== job.url,
+        );
+        this.acceptedJobs.get(job.browserId)?.delete(job.id);
+        job.id = randomUUID();
+        job.url = url;
+        job.browserId = command.browserId;
+        job.error = undefined;
+        job.finishedAt = undefined;
+        message = 'Assignment updated. Review and Start the edited job when ready.';
         break;
       }
       case 'job':
@@ -704,11 +839,29 @@ export class UnicornController {
     clearTimeout(this.sendTimer);
     clearTimeout(this.saveTimer);
     for (const id of this.active.keys()) this.stopped.add(id);
-    await this.manager.shutdown();
-    await Promise.allSettled(this.active.values());
+    const failures: unknown[] = [];
+    try {
+      await this.manager.shutdown();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await withDeadline(Promise.allSettled(this.active.values()), 30000);
+    } catch (error) {
+      failures.push(error);
+    }
     this.data.budget = this.budget.snapshot();
-    this.logs.add('info', 'application', 'Browser sessions and logs flushed; application stopped.');
-    await this.store.save(this.data);
-    await this.logs.flush();
+    this.data.requestBudget = this.requestBudget.snapshot();
+    this.logs.add(
+      failures.length ? 'warn' : 'info',
+      'application',
+      failures.length
+        ? 'Browser cleanup reported errors; preserving application state for recovery.'
+        : 'Browser sessions flushed; application is stopping.',
+    );
+    for (const result of await Promise.allSettled([this.store.save(this.data), this.logs.flush()]))
+      if (result.status === 'rejected') failures.push(result.reason);
+    if (failures.length)
+      throw new AggregateError(failures, 'Application shutdown encountered cleanup errors');
   }
 }

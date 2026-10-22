@@ -6,6 +6,7 @@ import type { PageProps } from './ui-types';
 export default function SettingsPage({ snapshot, run, confirm, busy }: PageProps) {
   const [settings, setSettings] = useState({ ...snapshot.settings });
   const [domains, setDomains] = useState(snapshot.settings.authorizedDomains.join('\n'));
+  const [exclusions, setExclusions] = useState(snapshot.settings.excludedLinkPatterns.join('\n'));
   const save = () =>
     void run(
       {
@@ -15,6 +16,10 @@ export default function SettingsPage({ snapshot, run, confirm, busy }: PageProps
           authorizedDomains: domains
             .split(/[\n,]/)
             .map((s) => s.trim())
+            .filter(Boolean),
+          excludedLinkPatterns: exclusions
+            .split('\n')
+            .map((pattern) => pattern.trim())
             .filter(Boolean),
           timings: snapshot.settings.timings,
           schedule: snapshot.settings.schedule,
@@ -78,6 +83,30 @@ export default function SettingsPage({ snapshot, run, confirm, busy }: PageProps
                 max="10000"
                 value={settings.dailyNavigationLimit}
                 onChange={(e) => setSettings({ ...settings, dailyNavigationLimit: Number(e.target.value) })}
+              />
+            </Field>
+            <Field
+              label="Daily request limit per domain"
+              hint="Counts page, frame, asset, Fetch/XHR and WebSocket opening requests across all profiles. Failed attempts count; resets at 00:00 UTC."
+            >
+              <input
+                type="number"
+                min="1"
+                max="1000000"
+                value={settings.dailyRequestLimit}
+                onChange={(e) => setSettings({ ...settings, dailyRequestLimit: Number(e.target.value) })}
+              />
+            </Field>
+            <Field
+              label="Excluded QA link patterns"
+              hint="One pattern per line, up to 50. Use * for any characters and ? for one character. For example: *logout* or https://staging.example.com/account/*."
+            >
+              <textarea
+                rows={3}
+                value={exclusions}
+                onChange={(e) => setExclusions(e.target.value)}
+                placeholder={'*logout*\n*/delete/*'}
+                spellCheck={false}
               />
             </Field>
           </section>
@@ -165,6 +194,12 @@ export default function SettingsPage({ snapshot, run, confirm, busy }: PageProps
               onChange={(closeToTray) => setSettings({ ...settings, closeToTray })}
             />
             <Toggle
+              label="Minimize to system tray"
+              hint="Hide the taskbar window when minimized. Use the Unicorn tray icon to restore it."
+              checked={settings.minimizeToTray}
+              onChange={(minimizeToTray) => setSettings({ ...settings, minimizeToTray })}
+            />
+            <Toggle
               label="Start at Windows login"
               checked={settings.startAtLogin}
               onChange={(startAtLogin) => setSettings({ ...settings, startAtLogin })}
@@ -240,6 +275,7 @@ export default function SettingsPage({ snapshot, run, confirm, busy }: PageProps
                     const defaults = structuredClone(DEFAULT_SETTINGS);
                     setSettings(defaults);
                     setDomains('');
+                    setExclusions('');
                     void run({ type: 'settings', settings: defaults }, 'Default preferences restored.');
                   },
                   true,

@@ -66,6 +66,7 @@ export interface DistributionOptions {
   ids: number[];
   mode: DistributionMode;
   existing?: TestJob[];
+  resourceLoads?: Record<number, number>;
   manual?: Record<string, number>;
   allowDuplicates?: boolean;
   allowLocalhost?: boolean;
@@ -85,7 +86,14 @@ export function distribute(options: DistributionOptions): TestJob[] {
   const queued = new Set(pending.map((job) => `${job.browserId}\n${job.url}`));
   const pendingUrls = new Set(pending.map((job) => job.url));
   const inputSeen = new Set<string>();
-  const loads = new Map(ids.map((id) => [id, pending.filter((job) => job.browserId === id).length]));
+  const loads = new Map(
+    ids.map((id) => {
+      const sampled = options.resourceLoads?.[id];
+      const resource =
+        typeof sampled === 'number' && Number.isFinite(sampled) ? Math.max(0, Math.min(1000, sampled)) : 0;
+      return [id, pending.filter((job) => job.browserId === id).length + resource];
+    }),
+  );
   const jobs: TestJob[] = [];
   let roundRobin = 0;
   normalized.forEach((url, index) => {

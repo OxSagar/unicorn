@@ -37,6 +37,10 @@ The normal state sequence is `CREATED → WAITING_FOR_PROXY → VALIDATING_PROXY
 
 Fixed-proxy configurations never contain a `DIRECT` alternative. The bypass list subtracts Chromium's implicit loopback bypass using `<-loopback>`. Proxy assignment also checks Chromium's resolved proxy result. Each assignment has a generation number: a stop or newer assignment invalidates an older pending assignment before it can reopen the request gate.
 
+Native mutations have an eight-second caller deadline. If a `setProxy` or `closeAllConnections` call has not actually settled when cancellation or timeout occurs, a Session-keyed registry marks that Session unusable for the remainder of the process. The request gate stays closed and every later assignment fails, including after closing and reopening its persistent profile. This prevents an unabortable late native completion from overwriting the route of another assignment. Restarting Unicorn creates a fresh network service while retaining profile data.
+
+The gate invokes a per-host request-budget check for every enabled HTTP, HTTPS or WebSocket request, followed by the navigation/scope check where applicable. Request and navigation budgets are persisted separately. `SiteRestrictionError` carries the actual restricted hostname within the main process, so redirected destinations and external QA stages stop the appropriate host's queued work. Renderer-facing messages retain the specific HTTP, quota or challenge failure without exposing new privileged APIs.
+
 ProxyScrape retrieval is a separate control-plane request made by Node. It does not run through a numbered browser profile. This allows proxy discovery before any browser proxy exists. Browser website requests, validator requests and provider requests are distinct in the implementation and documentation.
 
 ## Authorized QA and scheduling

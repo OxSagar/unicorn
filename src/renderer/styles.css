@@ -1474,6 +1474,15 @@ table .button {
   padding: 3px 6px;
   min-height: 25px;
 }
+.draft-status {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 7px 0 12px;
+  color: var(--text-faint);
+  font-size: 9px;
+}
 .subheading {
   display: flex;
   justify-content: space-between;
@@ -1595,6 +1604,36 @@ table .button {
 }
 .queue-section .surface-heading {
   margin-bottom: 14px;
+}
+.queue-help {
+  margin-bottom: 14px;
+}
+.queue-edit-error {
+  margin-bottom: 14px;
+}
+.queue-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.queue-editing-row {
+  background: var(--accent-bg);
+}
+.queue-edit-url {
+  min-width: 280px;
+}
+.queue-edit-url input {
+  width: 100%;
+  min-width: 240px;
+}
+.queue-editing-row input,
+.queue-editing-row select {
+  min-height: 34px;
+  font-size: 10px;
+}
+.queue-editing-row select {
+  min-width: 106px;
 }
 .country-strip {
   display: grid;

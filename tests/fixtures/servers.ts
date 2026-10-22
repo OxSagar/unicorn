@@ -20,7 +20,7 @@ export interface BrowserFixtures {
   httpsOrigin?: string;
   diagnosticUrl: string;
   proxies: FixtureProxy[];
-  requests: Array<{ path: string; proxied: boolean; at: number }>;
+  requests: Array<{ path: string; host: string; proxied: boolean; at: number }>;
   directRequests(): number;
   close(): Promise<void>;
 }
@@ -43,7 +43,7 @@ export async function createFixtures(
   const servers: Server[] = [];
   const requests: BrowserFixtures['requests'] = [];
   const certificatePrefix = options.untrustedCertificate ? 'untrusted' : 'fixture';
-  const certificateDirectory = options.certificateDirectory ?? 'test-results/certificates';
+  const certificateDirectory = options.certificateDirectory ?? 'tmp/test-certificates';
   const certificatePath = resolve(certificateDirectory, `${certificatePrefix}.pem`);
   const keyPath = resolve(certificateDirectory, `${certificatePrefix}.key`);
   const tls =
@@ -75,11 +75,12 @@ export async function createFixtures(
     );
   };
   const handler: http.RequestListener = (request, response) => {
-    const path = new URL(request.url ?? '/', 'http://localhost').pathname;
+    const requested = new URL(request.url ?? '/', 'http://localhost');
+    const path = requested.pathname;
     const proxied =
       request.headers['x-unicorn-fixture-proxy'] !== undefined ||
       proxiedPorts.has(request.socket.remotePort ?? 0);
-    requests.push({ path, proxied, at: Date.now() });
+    requests.push({ path, host: request.headers.host ?? '', proxied, at: Date.now() });
     if (path === '/diagnostic') {
       diagnostic(Number(request.headers['x-unicorn-fixture-proxy'] ?? 1), response);
       return;
@@ -137,6 +138,42 @@ export async function createFixtures(
         <script>window.challengeInteractions = 0;
           ${path === '/challenge-delayed' ? `setTimeout(() => document.body.insertAdjacentHTML('beforeend', ${JSON.stringify(widget)}), 300);` : ''}
         </script></body></html>`);
+      return;
+    }
+    if (path.startsWith('/policy/')) {
+      response.setHeader('Cache-Control', 'no-store');
+      if (path.startsWith('/policy/burst/')) {
+        response.setHeader('Content-Type', 'application/json');
+        response.end('{"ok":true}');
+        return;
+      }
+      const scheme = 'encrypted' in request.socket && request.socket.encrypted ? 'https:' : 'http:';
+      const externalOrigin = new URL(`${scheme}//${request.headers.host}`);
+      externalOrigin.hostname = externalOrigin.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+      const mode = requested.searchParams.get('external') === 'forbidden' ? 'forbidden' : 'complete';
+      let content = '<p id="policy-ready">Controlled page without links</p>';
+      if (path === '/policy/landing')
+        content = `<a id="policy-internal" href="/policy/internal?external=${mode}">Approved internal page</a>`;
+      else if (path === '/policy/internal')
+        content = `<a id="policy-external" href="${externalOrigin.origin}${mode === 'forbidden' ? '/forbidden' : '/policy/external'}">Approved external page</a>`;
+      else if (path === '/policy/excluded')
+        content = '<a id="excluded-link" href="/policy/must-not-load">Excluded internal destination</a>';
+      const script =
+        path === '/policy/fetch-burst'
+          ? `window.burst = { started: 0, succeeded: 0, rejected: 0, done: false };
+           setTimeout(async () => {
+             for (let index = 1; index <= 8; index++) {
+               window.burst.started++;
+               try { await fetch('/policy/burst/' + index, { cache: 'no-store' }).then(response => response.text()); window.burst.succeeded++; }
+               catch { window.burst.rejected++; }
+             }
+             window.burst.done = true;
+           }, 200);`
+          : '';
+      response.setHeader('Content-Type', 'text/html; charset=utf-8');
+      response.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="icon" href="data:,"><title>Controlled policy fixture ${path}</title></head>
+        <body><h1>Authorized policy test</h1>${content}<script>window.policyReady = true;${script}</script></body></html>`);
       return;
     }
     response.setHeader('Content-Type', 'text/html; charset=utf-8');

@@ -1,12 +1,42 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DistributionMode } from '../shared/types';
 import { Badge, Button, EmptyState, Field, Icon, SectionTitle, Status } from './components';
 import type { PageProps } from './ui-types';
 
+const DRAFT_KEY = 'unicorn.link-draft.v1';
+const DRAFT_LIMIT = 2_000_000;
+
+function readDraft(): { text: string; error?: string } {
+  try {
+    const text = window.localStorage.getItem(DRAFT_KEY) ?? '';
+    if (text.length > DRAFT_LIMIT)
+      return {
+        text: '',
+        error: 'The saved draft exceeds the 2 million character limit. Clear input to remove it.',
+      };
+    return { text };
+  } catch {
+    return { text: '', error: 'The saved draft could not be read. Local storage may be unavailable.' };
+  }
+}
+
+function hasValidUrlSyntax(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
 const methods: Array<{ id: DistributionMode; title: string; text: string }> = [
   { id: 'same', title: 'Same URL to all', text: 'Compare one page across every selected browser.' },
   { id: 'round-robin', title: 'Round-robin', text: 'Assign each URL to the next selected browser.' },
-  { id: 'balanced', title: 'Balanced', text: 'Distribute URLs according to pending workload.' },
+  {
+    id: 'balanced',
+    title: 'Balanced',
+    text: 'Use pending workload and current CPU/memory samples to distribute URLs.',
+  },
   { id: 'manual', title: 'Manual', text: 'Choose the destination browser for each URL.' },
 ];
 export default function LinksPage({
@@ -18,11 +48,71 @@ export default function LinksPage({
   setPage,
   busy,
 }: PageProps) {
-  const [text, setText] = useState('');
+  const [initialDraft] = useState(readDraft);
+  const [text, setText] = useState(initialDraft.text);
+  const [draftError, setDraftError] = useState(initialDraft.error);
+  const [draftInputError, setDraftInputError] = useState<string>();
+  const [draftSaved, setDraftSaved] = useState(!initialDraft.error);
+  const draft = useRef(text);
+  const draftDirty = useRef(false);
   const [mode, setMode] = useState<DistributionMode>('round-robin');
   const [allowDuplicates, setAllowDuplicates] = useState(false);
   const [manual, setManual] = useState<Record<string, number>>({});
   const [filter, setFilter] = useState('all');
+  const [editing, setEditing] = useState<{ id: string; url: string; browserId: number } | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState<string>();
+  const persistDraft = useCallback((report = true) => {
+    if (!draftDirty.current) return;
+    try {
+      if (draft.current) window.localStorage.setItem(DRAFT_KEY, draft.current);
+      else window.localStorage.removeItem(DRAFT_KEY);
+      draftDirty.current = false;
+      if (report) {
+        setDraftSaved(true);
+        setDraftError(undefined);
+      }
+    } catch {
+      if (report) {
+        setDraftSaved(false);
+        setDraftError(
+          'Draft could not be saved locally. Copy your URLs before leaving this page or closing Unicorn.',
+        );
+      }
+    }
+  }, []);
+  const updateText = (next: string) => {
+    if (next.length > DRAFT_LIMIT) {
+      setDraftInputError(
+        'The draft is limited to 2 million characters. Your previous text was kept; split the list into smaller batches.',
+      );
+      return;
+    }
+    draft.current = next;
+    draftDirty.current = true;
+    setText(next);
+    setDraftSaved(false);
+    setDraftInputError(undefined);
+  };
+  useEffect(() => {
+    const timer = window.setTimeout(() => persistDraft(), 250);
+    return () => window.clearTimeout(timer);
+  }, [text, persistDraft]);
+  useEffect(() => {
+    const flush = () => persistDraft(false);
+    window.addEventListener('pagehide', flush);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      flush();
+    };
+  }, [persistDraft]);
+  useEffect(() => {
+    if (!editing || savingEdit) return;
+    if (snapshot.jobs.find((job) => job.id === editing.id)?.status !== 'pending') {
+      setEditing(null);
+      setEditError('This job is no longer pending. Its unsaved changes were not applied.');
+    }
+  }, [editing, savingEdit, snapshot.jobs]);
   const urls = useMemo(
     () =>
       text
@@ -32,15 +122,30 @@ export default function LinksPage({
     [text],
   );
   const duplicates = urls.length - new Set(urls).size;
-  const invalid = urls.filter((raw) => {
-    try {
-      const url = new URL(raw);
-      return !['http:', 'https:'].includes(url.protocol) || !!url.username || !!url.password;
-    } catch {
-      return true;
-    }
-  });
+  const invalid = urls.filter((raw) => !hasValidUrlSyntax(raw));
   const queue = snapshot.jobs.filter((job) => filter === 'all' || job.status === filter);
+  const canSaveEdit =
+    editing &&
+    hasValidUrlSyntax(editing.url.trim()) &&
+    snapshot.browsers.some((browser) => browser.id === editing.browserId);
+  const saveEdit = async () => {
+    if (!editing || !canSaveEdit || savingEdit || busy) return;
+    setSavingEdit(true);
+    setEditError(undefined);
+    try {
+      const result = await run(
+        { type: 'edit-job', id: editing.id, url: editing.url.trim(), browserId: editing.browserId },
+        'Assignment updated. Review the pending job, then Start when ready.',
+      );
+      if (result) setEditing(null);
+      else
+        setEditError(
+          'The edit was not saved. Check the error above, correct the URL or browser, and try again.',
+        );
+    } finally {
+      setSavingEdit(false);
+    }
+  };
   const toggleBrowser = (id: number) =>
     setSelected(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
   const distribute = () =>
@@ -66,10 +171,13 @@ export default function LinksPage({
         actions={
           <Button
             icon="upload"
+            disabled={busy}
             onClick={() =>
               void run({ type: 'import-urls' }).then((result) => {
-                if (result?.importedUrls)
-                  setText((previous) => [previous, ...result.importedUrls!].filter(Boolean).join('\n'));
+                if (result?.importedUrls?.length) {
+                  const separator = draft.current && !draft.current.endsWith('\n') ? '\n' : '';
+                  updateText(`${draft.current}${separator}${result.importedUrls.join('\n')}`);
+                }
               })
             }
           >
@@ -95,12 +203,13 @@ export default function LinksPage({
           </div>
           <Field
             label="One URL per line"
-            hint="Use full HTTPS addresses. Your original list stays here after distribution."
+            hint="Use full HTTPS addresses. Your original text is saved on this computer until you clear it."
           >
             <textarea
               className="url-textarea"
               value={text}
-              onChange={(e) => setText(e.target.value)}
+              onChange={(e) => updateText(e.target.value)}
+              onBlur={() => persistDraft()}
               placeholder={
                 'https://staging.example.com/\nhttps://staging.example.com/products\nhttps://staging.example.com/contact'
               }
@@ -119,10 +228,30 @@ export default function LinksPage({
               )}
             </span>
             <span>{duplicates} duplicates</span>
-            <Button variant="ghost" onClick={() => setText('')} disabled={!text}>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                updateText('');
+                persistDraft();
+              }}
+              disabled={!text && !draftError && !draftInputError}
+            >
               Clear input
             </Button>
           </div>
+          <div className="draft-status" role="status" aria-live="polite">
+            <span>
+              {draftSaved ? (text ? 'Draft saved locally' : 'No saved draft') : 'Draft not yet saved'}
+            </span>
+            <span>
+              {text.length.toLocaleString()} / {DRAFT_LIMIT.toLocaleString()} characters
+            </span>
+          </div>
+          {(draftError || draftInputError) && (
+            <p className="field-error" role="alert">
+              {draftInputError || draftError}
+            </p>
+          )}
           {invalid.length > 0 && <p className="field-error">Check: {invalid.slice(0, 2).join(', ')}</p>}
           <label className="checkbox-line">
             <input
@@ -233,6 +362,7 @@ export default function LinksPage({
           <div className="toolbar-actions">
             <select
               aria-label="Filter queue status"
+              disabled={busy || !!editing}
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
             >
@@ -243,6 +373,7 @@ export default function LinksPage({
             </select>
             <Button
               variant="ghost"
+              disabled={busy || !!editing}
               onClick={() =>
                 confirm(
                   'Clear pending queue?',
@@ -256,13 +387,21 @@ export default function LinksPage({
             <Button
               icon="play"
               variant="primary"
-              disabled={!snapshot.jobs.some((j) => j.status === 'pending')}
+              disabled={busy || !!editing || !snapshot.jobs.some((j) => j.status === 'pending')}
               onClick={() => void run({ type: 'global', action: 'start' })}
             >
               Start tests
             </Button>
           </div>
         </div>
+        <p className="queue-help muted small-text">
+          Edit a pending URL or browser assignment before starting. Saved edits wait for another Start.
+        </p>
+        {editError && (
+          <p className="field-error queue-edit-error" role="alert">
+            {editError}
+          </p>
+        )}
         {!queue.length ? (
           <EmptyState icon="link" title="No test jobs here">
             Add URLs and choose a distribution method to prepare your next run.
@@ -284,13 +423,62 @@ export default function LinksPage({
                   .slice(-200)
                   .reverse()
                   .map((job) => (
-                    <tr key={job.id}>
-                      <td className="url-cell" title={job.error || job.url}>
-                        {job.url}
-                        {job.error && <small className="text-danger">{job.error}</small>}
+                    <tr key={job.id} className={editing?.id === job.id ? 'queue-editing-row' : undefined}>
+                      <td
+                        className={editing?.id === job.id ? 'queue-edit-url' : 'url-cell'}
+                        title={job.error || job.url}
+                      >
+                        {editing?.id === job.id ? (
+                          <input
+                            aria-label="Edit destination URL"
+                            type="url"
+                            value={editing.url}
+                            onChange={(event) => setEditing({ ...editing, url: event.target.value })}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault();
+                                void saveEdit();
+                              }
+                              if (event.key === 'Escape' && !savingEdit) {
+                                setEditing(null);
+                                setEditError(undefined);
+                              }
+                            }}
+                            disabled={savingEdit}
+                            spellCheck={false}
+                            autoFocus
+                          />
+                        ) : (
+                          <>
+                            {job.url}
+                            {job.error && <small className="text-danger">{job.error}</small>}
+                          </>
+                        )}
                       </td>
                       <td>
-                        <span className="table-browser">{String(job.browserId).padStart(2, '0')}</span>
+                        {editing?.id === job.id ? (
+                          <select
+                            aria-label="Edit assigned browser"
+                            value={editing.browserId}
+                            onChange={(event) =>
+                              setEditing({ ...editing, browserId: Number(event.target.value) })
+                            }
+                            disabled={savingEdit}
+                          >
+                            {!snapshot.browsers.some((browser) => browser.id === editing.browserId) && (
+                              <option value={editing.browserId} disabled>
+                                Browser {editing.browserId} (closed)
+                              </option>
+                            )}
+                            {snapshot.browsers.map((browser) => (
+                              <option value={browser.id} key={browser.id}>
+                                Browser {browser.id}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="table-browser">{String(job.browserId).padStart(2, '0')}</span>
+                        )}
                       </td>
                       <td>
                         <Status state={job.status} />
@@ -298,12 +486,48 @@ export default function LinksPage({
                       <td className="nowrap">{new Date(job.createdAt).toLocaleTimeString()}</td>
                       <td>
                         {job.status === 'pending' && (
-                          <Button
-                            variant="ghost"
-                            onClick={() => void run({ type: 'job', id: job.id, action: 'remove' })}
-                          >
-                            Remove
-                          </Button>
+                          <div className="queue-row-actions">
+                            {editing?.id === job.id ? (
+                              <>
+                                <Button
+                                  variant="primary"
+                                  disabled={busy || savingEdit || !canSaveEdit}
+                                  onClick={() => void saveEdit()}
+                                >
+                                  {savingEdit ? 'Saving…' : 'Save'}
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  disabled={savingEdit}
+                                  onClick={() => {
+                                    setEditing(null);
+                                    setEditError(undefined);
+                                  }}
+                                >
+                                  Cancel
+                                </Button>
+                              </>
+                            ) : (
+                              <>
+                                <Button
+                                  disabled={busy || !!editing}
+                                  onClick={() => {
+                                    setEditError(undefined);
+                                    setEditing({ id: job.id, url: job.url, browserId: job.browserId });
+                                  }}
+                                >
+                                  Edit
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  disabled={busy || !!editing}
+                                  onClick={() => void run({ type: 'job', id: job.id, action: 'remove' })}
+                                >
+                                  Remove
+                                </Button>
+                              </>
+                            )}
+                          </div>
                         )}
                       </td>
                     </tr>

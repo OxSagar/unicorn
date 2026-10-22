@@ -132,6 +132,8 @@ export class DomainBudget {
       throw new Error('Daily navigation limit must be a positive integer');
     this.rollover();
     const domain = new URL(url).hostname.toLowerCase().replace(/\.$/, '');
+    if (!this.counts.has(domain) && this.counts.size >= 10000)
+      throw new Error('Daily domain tracking limit reached; review the test scope before continuing');
     const current = this.counts.get(domain) ?? 0;
     if (current >= limit) throw new Error(`Daily navigation limit reached for ${domain}`);
     this.counts.set(domain, current + 1);

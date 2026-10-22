@@ -134,18 +134,22 @@ On Windows, application state normally lives under `%APPDATA%\Unicorn`. The dire
 
 Enter one full URL per line or import a TXT/CSV file. The desktop file importer accepts files up to 2 MB. TXT imports allow comment lines beginning with `#`; CSV imports can use a `url`, `link`, or `address` column. The prepared queue is bounded to 1,000 active jobs.
 
-The original input list stays visible after distribution. Review syntax errors and duplicate counts, choose profiles, then select a mode:
+The URL editor saves a local draft on this computer. Its exact text, including spaces, blank lines, order, and duplicates, survives page changes and application restart. Distribution reads the list without rewriting that draft. TXT/CSV imports append the extracted URLs to the editor; the original file's other columns, comments, and formatting are not archived. The draft is limited to 2 million characters. An addition over that limit is rejected with a message, leaving the previous text intact. **Clear input** deletes the saved draft without removing queue assignments. If local storage fails, the page displays an error so you can copy the draft before leaving.
 
-| Mode            | Assignment                                                                     |
-| --------------- | ------------------------------------------------------------------------------ |
-| Same URL to all | Exactly one URL is assigned to each selected browser                           |
-| Round-robin     | Consecutive URLs go to consecutive selected browser profiles                   |
-| Balanced        | Pending/running workload is considered when choosing the next selected browser |
-| Manual          | Choose a selected browser for each input URL before distribution               |
+Review syntax errors and duplicate counts, choose profiles, then select a mode:
 
-Duplicate pending jobs are excluded unless you enable the duplicate option. Distinct profile assignments used for a compatibility comparison are still meaningful separate jobs.
+| Mode            | Assignment                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------------ |
+| Same URL to all | Exactly one URL is assigned to each selected browser                                                   |
+| Round-robin     | Consecutive URLs go to consecutive selected browser profiles                                           |
+| Balanced        | Pending/running workload and current renderer CPU/memory samples help choose the next selected browser |
+| Manual          | Choose a selected browser for each input URL before distribution                                       |
 
-Distribution does not start browsing. Inspect **Queue preview** first. Remove a pending job and redistribute its URL to change that assignment. **Clear pending** removes pending assignments and disables saved recurrence, including recovery after restart; completed and failed records remain only within the application’s bounded retained history. Export results when you need an external record.
+Duplicate pending jobs are excluded unless you enable the duplicate option. Distinct profile assignments used for a compatibility comparison are still meaningful separate jobs. Balanced distribution uses a resource-weighted estimate when assigning work; it does not continuously migrate assignments or guarantee equal completion times.
+
+Distribution does not start browsing. Inspect **Queue preview** first. On a pending row, select **Edit** to change its URL, its browser, or both. **Save** validates the destination against the authorized scope and open browser profiles; rejected edits leave the previous assignment intact and keep the editor open for correction. **Cancel** discards the unsaved changes. A saved edit is pending and needs another explicit **Start**, including when that row had previously been reviewed during a run. Editing does not rewrite the original draft or send browser traffic. Running and finished records cannot be edited.
+
+**Remove** deletes one pending assignment. **Clear pending** removes pending assignments and disables saved recurrence, including recovery after restart; it leaves the draft in the editor. Completed and failed records remain only within the application's bounded retained history. Export results when you need an external record.
 
 ## 6. Device profiles
 
@@ -193,9 +197,11 @@ The default sequence has 200 seconds of configured waiting/scrolling, plus navig
 
 Missing or ineligible links are skipped and logged. Sponsored/ad links are excluded from automatic selection. The runner records client errors, page timing information, and bounded diagnostic screenshots. It does not automatically click ads or bypass CAPTCHA challenges.
 
+In **Settings**, **Excluded QA link patterns** prevents automatic selection of matching links and rejects a matching starting URL. Use one pattern per line (up to 50); `*` matches any characters and `?` matches one character, case-insensitively. For example, `*logout*` excludes logout links. These exclusions supplement the approved domain scope and the built-in advertising-link filters.
+
 In **Test schedules**, edit the stage durations, navigation timeout, maximum scroll distance, repeat interval, operating window, and recovery preference. Save before relying on new values. An interval can be at least one minute, with a default of 30 minutes; choose a cadence suitable for your authorized test environment.
 
-Operating hours use the Windows computer’s local timezone. `00:00` through `24:00` allows the full day. A window that crosses midnight is supported. Daily navigation budgets use UTC dates and reset at 00:00 UTC; failed attempts consume budget too. The limit counts navigation attempts per host, not every image, script, or API request made by a page.
+Operating hours use the Windows computer’s local timezone. `00:00` through `24:00` allows the full day. A window that crosses midnight is supported. Separate daily navigation and request budgets use UTC dates and reset at 00:00 UTC; failed attempts consume budget too. The request limit counts page, frame, asset, Fetch/XHR and WebSocket opening requests per host across all profiles, including manual browsing. WebSocket frames are not individual requests. Reaching either limit stops the affected work for review.
 
 To set up repeated monitoring, enable **Repeat authorized test runs**, select **Save schedule**, then review the queue and select **Start tests**, **Start all**, a browser’s **Start**, or **Run queued tests now**. Start captures the current pending jobs for the chosen browsers as their recurring URLs. Historical completed records do not become recurring work. Starting a replacement queue for one browser replaces that browser’s recurring URLs while retaining the saved sets for other browsers.
 
@@ -218,6 +224,8 @@ The memory threshold can defer new QA jobs when the current app measurement exce
 ## 10. Tray, startup, and updates
 
 When **Close to system tray** is enabled, the window’s Close button hides the main window while the application remains active. The tray menu offers **Show Unicorn**, **Pause all tests**, **Emergency stop**, and **Quit**. Quit performs graceful shutdown. Without close-to-tray enabled, closing the window exits the app.
+
+**Minimize to system tray** hides the taskbar window when minimized; use the tray icon to restore it. The separate **Close to system tray** setting controls the close button.
 
 **Start at Windows login** is optional. It opens the application in a logged-in user session; it does not create a system service or bypass login.
 

@@ -64,6 +64,8 @@ export function validateSettings(input: unknown): AppSettings {
       'authorizedDomains',
       'stagingConfirmed',
       'dailyNavigationLimit',
+      'dailyRequestLimit',
+      'excludedLinkPatterns',
       'retryLimit',
       'proxyTimeoutMs',
       'proxyRefreshMinutes',
@@ -72,6 +74,7 @@ export function validateSettings(input: unknown): AppSettings {
       'closePopupsAfterRun',
       'theme',
       'closeToTray',
+      'minimizeToTray',
       'startAtLogin',
       'resourceLimitMb',
       'logRetentionDays',
@@ -85,6 +88,9 @@ export function validateSettings(input: unknown): AppSettings {
   const domains = [
     ...new Set(value.authorizedDomains.map((domain) => normalizeDomain(string(domain, 'Domain', 253)))),
   ];
+  const exclusions = value.excludedLinkPatterns ?? [];
+  if (!Array.isArray(exclusions) || exclusions.length > 50)
+    throw new Error('Provide up to 50 link exclusion patterns');
   const timings = record(value.timings, 'timings');
   const timingFields = [
     'landingWaitMs',
@@ -104,6 +110,10 @@ export function validateSettings(input: unknown): AppSettings {
     authorizedDomains: domains,
     stagingConfirmed: boolean(value.stagingConfirmed, 'Staging confirmation'),
     dailyNavigationLimit: number(value.dailyNavigationLimit, 'Daily navigation limit', 1, 100000),
+    dailyRequestLimit: number(value.dailyRequestLimit ?? 10000, 'Daily request limit', 1, 1000000),
+    excludedLinkPatterns: [
+      ...new Set(exclusions.map((pattern) => string(pattern, 'Link exclusion pattern', 512))),
+    ],
     retryLimit: number(value.retryLimit, 'Retry limit', 0, 5),
     proxyTimeoutMs: number(value.proxyTimeoutMs, 'Proxy timeout', 1000, 60000),
     proxyRefreshMinutes: number(value.proxyRefreshMinutes, 'Proxy refresh interval', 1, 1440),
@@ -112,6 +122,7 @@ export function validateSettings(input: unknown): AppSettings {
     closePopupsAfterRun: boolean(value.closePopupsAfterRun, 'Close popups'),
     theme: enumeration(value.theme, ['dark', 'light'], 'theme'),
     closeToTray: boolean(value.closeToTray, 'Close to tray'),
+    minimizeToTray: boolean(value.minimizeToTray ?? false, 'Minimize to tray'),
     startAtLogin: boolean(value.startAtLogin, 'Start at login'),
     resourceLimitMb: number(value.resourceLimitMb, 'Resource limit', 512, 131072),
     logRetentionDays: number(value.logRetentionDays, 'Log retention', 1, 90),
@@ -222,6 +233,14 @@ export function validateCommand(input: unknown): AppCommand {
             : boolean(value.allowDuplicates, 'Allow duplicate jobs'),
       };
     }
+    case 'edit-job':
+      keys(value, ['type', 'id', 'url', 'browserId'], 'command');
+      return {
+        type,
+        id: string(value.id, 'Job ID', 128),
+        url: string(value.url, 'URL'),
+        browserId: id(value.browserId),
+      };
     case 'job':
       keys(value, ['type', 'id', 'action'], 'command');
       return {

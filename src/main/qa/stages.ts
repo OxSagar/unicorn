@@ -1,6 +1,7 @@
 import type { WebContents } from 'electron';
 import type { AppSettings } from '../../shared/types';
 import { assertApproved } from '../core/scope';
+import { isExcludedLink } from '../core/link-exclusions';
 import { RunControl } from './control';
 import { withDeadline } from '../browser/deadline';
 
@@ -69,6 +70,8 @@ export async function runStages(initialUrl: string, hooks: QaHooks): Promise<voi
   if (!settings.stagingConfirmed)
     throw new Error('Confirm an authorized staging or test-ad environment before automated QA');
   const initial = assertApproved(initialUrl, settings);
+  if (isExcludedLink(initial, settings.excludedLinkPatterns))
+    throw new Error('The starting URL matches an excluded QA link pattern');
   const origin = new URL(initial).origin;
   hooks.stage('Landing page: navigation');
   await hooks.navigate(initial);
@@ -77,6 +80,7 @@ export async function runStages(initialUrl: string, hooks: QaHooks): Promise<voi
   const internal = firstLinks.find((candidate) => {
     try {
       const target = assertApproved(candidate, settings);
+      if (isExcludedLink(target, settings.excludedLinkPatterns)) return false;
       return new URL(target).origin === origin && target.split('#')[0] !== initial.split('#')[0];
     } catch {
       return false;
@@ -93,7 +97,12 @@ export async function runStages(initialUrl: string, hooks: QaHooks): Promise<voi
   for (const candidate of candidates) {
     try {
       if (new URL(candidate).origin === current) continue;
-      external = assertApproved(candidate, settings);
+      const target = assertApproved(candidate, settings);
+      if (isExcludedLink(target, settings.excludedLinkPatterns)) {
+        hooks.log('External-link destination skipped because it matches an exclusion pattern');
+        continue;
+      }
+      external = target;
       break;
     } catch {
       hooks.log('External-link destination skipped because it is outside the approved scope');

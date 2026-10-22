@@ -21,6 +21,12 @@ describe('privileged IPC input validation', () => {
     { browserCount: 0 },
     { browserCount: 1.5 },
     { dailyNavigationLimit: Infinity },
+    { dailyRequestLimit: 0 },
+    { dailyRequestLimit: 1000001 },
+    { excludedLinkPatterns: [''] },
+    { excludedLinkPatterns: ['x'.repeat(513)] },
+    { excludedLinkPatterns: Array.from({ length: 51 }, () => '*logout*') },
+    { minimizeToTray: 'true' },
     { retryLimit: 6 },
     { proxyTimeoutMs: 1 },
     { proxyRefreshMinutes: 0 },
@@ -108,6 +114,21 @@ describe('privileged IPC input validation', () => {
       'test-job',
     );
     expect(validateCommand({ type: 'diagnostic', id: 2 })).toEqual({ type: 'diagnostic', id: 2 });
+    expect(
+      validateCommand({ type: 'edit-job', id: 'pending', url: 'https://example.com/a', browserId: 2 }),
+    ).toEqual({ type: 'edit-job', id: 'pending', url: 'https://example.com/a', browserId: 2 });
+    expect(() =>
+      validateCommand({ type: 'edit-job', id: 'pending', url: 'https://example.com/a', browserId: 21 }),
+    ).toThrow();
+    expect(() =>
+      validateCommand({
+        type: 'edit-job',
+        id: 'pending',
+        url: 'https://example.com/a',
+        browserId: 2,
+        path: '/etc/passwd',
+      }),
+    ).toThrow();
   });
   it.each(['same', 'round-robin', 'balanced', 'manual'])('validates distribution %s', (mode) => {
     expect(
