@@ -1,0 +1,107 @@
+name: Verify Unicorn
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'feat/**', 'fix/**']
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-fund
+      - run: npm run typecheck
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm test
+      - run: npm audit --audit-level=high --fetch-retries=1 --fetch-timeout=30000
+      - run: npm run build
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: always()
+        with:
+          name: unit-test-reports
+          path: test-results
+          retention-days: 14
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Generate isolated HTTPS fixture certificate
+        run: node tests/fixtures/prepare-cert.mjs
+      - name: Trust the fixture certificate in this temporary runner
+        shell: pwsh
+        run: |
+          $cert = Import-Certificate -FilePath test-results/certificates/fixture.cer -CertStoreLocation Cert:\CurrentUser\Root
+          "UNICORN_FIXTURE_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
+      - name: Exercise real Chromium and proxy failures
+        run: npm run test:e2e
+      - name: Build Windows installer and portable archive
+        run: npm run package:win
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Launch the packaged Windows executable
+        run: npm run test:packaged
+      - name: Verify installer installation and launch
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem release/Unicorn-Setup-*.exe | Select-Object -First 1
+          $destination = Join-Path $env:RUNNER_TEMP 'UnicornInstalled'
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList "/S", "/D=$destination" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
+          $exe = Join-Path $destination 'Unicorn.exe'
+          if (!(Test-Path $exe)) { throw 'Installed executable is missing' }
+          $report = Join-Path $env:GITHUB_WORKSPACE 'test-results/installed-smoke.json'
+          $process = Start-Process -FilePath $exe -ArgumentList "--smoke-output=$report" -PassThru
+          if (!$process.WaitForExit(60000)) { $process.Kill(); throw 'Installed app timed out' }
+          if ($process.ExitCode -ne 0) { throw 'Installed app failed' }
+          $result = Get-Content $report | ConvertFrom-Json
+          if (!$result.windowReady -or !$result.sandbox -or !$result.contextIsolation) { throw 'Installed app security smoke check failed' }
+      - run: npm run checksums
+      - name: Remove the temporary trusted certificate
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:UNICORN_FIXTURE_THUMBPRINT) {
+            Remove-Item "Cert:\CurrentUser\Root\$env:UNICORN_FIXTURE_THUMBPRINT" -ErrorAction SilentlyContinue
+          }
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: always()
+        with:
+          name: windows-verification-reports
+          path: |
+            test-results
+            playwright-report
+          retention-days: 14
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: success()
+        with:
+          name: windows-release-assets
+          path: |
+            release/*.exe
+            release/*.zip
+            release/SHA256SUMS.txt
+          retention-days: 30

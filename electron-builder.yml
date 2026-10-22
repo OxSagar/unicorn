@@ -1,0 +1,30 @@
+appId: com.oxsagar.unicorn
+productName: Unicorn
+directories:
+  output: release
+  buildResources: resources
+files:
+  - dist/**/*
+  - package.json
+  - README.md
+  - LICENSE
+  - docs/user-guide.md
+asar: true
+npmRebuild: false
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: zip
+      arch: [x64]
+  executableName: Unicorn
+  artifactName: Unicorn-Portable-v${version}-${arch}.${ext}
+nsis:
+  artifactName: Unicorn-Setup-v${version}-${arch}.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+publish: null
