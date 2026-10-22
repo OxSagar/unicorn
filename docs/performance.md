@@ -18,7 +18,21 @@ GitHub-hosted Windows runners are a verification environment; their available CP
 
 ## Short-run evidence
 
-Native tests create and navigate 1, 5, 10, 15, and 20 browsers on controlled fixtures, exercise all selectable counts, measure snapshot responsiveness, and clean up child processes. These results must be read from the associated CI artifact. A separate short stability test starts 20 profiles once and requires three actual one-minute recurrence cycles, 60 completed jobs, retained per-profile storage, unique leases, zero direct fixture requests and complete cleanup. Its raw attachment includes repeated resource, heartbeat and dashboard-response samples. This short test is distinct from the 24-hour procedure below. No baseline CPU/RAM numbers are asserted here before they have been measured.
+The [Windows verification record](verification.md) and [machine-readable evidence](evidence/windows-candidate.json) identify the exact source SHA, run, test results and hardware. The hosted runner exposed four logical CPUs and 16,379 MiB RAM on Windows Server 2025. Native tests passed concurrent navigation at 1, 5, 10, 15 and 20 profiles, plus creation/resizing/closure at every count from 1 through 20.
+
+| Profiles | Workload elapsed (ms) | Summed CPU sample | Summed working set (MiB) | Electron processes | Dashboard IPC (ms) |
+| -------: | --------------------: | ----------------: | -----------------------: | -----------------: | -----------------: |
+|        1 |                   122 |            17.59% |                      402 |                  5 |                  5 |
+|        5 |                 1,008 |            18.64% |                      788 |                  9 |                  6 |
+|       10 |                 2,916 |            10.58% |                    1,291 |                 14 |                  7 |
+|       15 |                 4,013 |            10.84% |                    1,793 |                 19 |                 11 |
+|       20 |                 4,991 |            14.37% |                    2,288 |                 24 |                 14 |
+
+Workload elapsed includes proxy preparation, navigation, page verification and metrics collection after profile creation. CPU is a single aggregate Electron sample, not a sustained average. Summed working sets may count shared OS pages more than once. Dashboard IPC is a snapshot-command roundtrip, not visual frame rate or input-to-paint latency. The pages are small fixtures, not arbitrary production workloads.
+
+A separate **141.840-second** run started 20 profiles once and completed **60 jobs across three actual one-minute cycles**. All profile storage markers survived; no direct fixture request occurred; Stop released all leases. Across 69 samples, memory was 1,860 MiB initially and 1,510 MiB finally, with a 2,084 MiB peak; median/max summed CPU was 0.4%/20.3%; median/max dashboard IPC was 18.13/81.89 ms. The process count stayed at 24, and heartbeat delay peaked at 40 ms. This short run does not establish long-term memory stability or a production crash rate.
+
+The native suite also deliberately injected eight renderer crashes across six cases; all recovery/containment tests passed. The short scheduling workload configured renderer retries to zero and completed every job, but did not collect a separate systemwide crash counter. See the verification record for exact scope and earlier failed stress-fixture runs. Consumer Windows benchmarks and the 24-hour procedure remain separate acceptance work.
 
 ## Extended soak procedure
 

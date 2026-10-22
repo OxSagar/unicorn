@@ -87,7 +87,9 @@ test('twenty profiles complete three real minute-interval QA cycles from one Sta
           internalScrollMs: 0,
           externalWaitMs: 0,
           externalScrollMs: 0,
-          navigationTimeoutMs: 6000,
+          // Twenty simultaneous renderers contend on hosted runners; this is
+          // still below the production navigation default of 45 seconds.
+          navigationTimeoutMs: 15000,
           maxScrollPx: 0,
         },
       },

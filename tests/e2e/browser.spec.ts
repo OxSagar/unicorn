@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import os from 'node:os';
 import { createFixtures, type BrowserFixtures } from '../fixtures/servers';
 import { launchUnicorn, closeHarness, invoke, snapshot, browserEvaluate, type Harness } from './helpers';
-import { DEVICES } from '../../src/shared/defaults';
+import { DEFAULT_SETTINGS, DEVICES } from '../../src/shared/defaults';
 
 let fixtures: BrowserFixtures;
 let harness: Harness | undefined;
@@ -229,7 +229,11 @@ for (const count of [1, 5, 10, 15, 20])
     browserName: _browserName,
   }, testInfo) => {
     test.setTimeout(180000);
-    harness = await launchUnicorn(fixtures);
+    // Simultaneous renderers contend on hosted runners; 15 seconds remains
+    // bounded below the production navigation default of 45 seconds.
+    harness = await launchUnicorn(fixtures, {
+      settings: { timings: { ...DEFAULT_SETTINGS.timings, navigationTimeoutMs: 15000 } },
+    });
     await invoke(harness, { type: 'create', count });
     const before = fixtures.directRequests();
     const started = Date.now();

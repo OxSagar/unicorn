@@ -32,12 +32,22 @@ jobs:
           sha256sum --check SHA256SUMS.txt
           cd ..
           node scripts/verify-release.mjs
-      - name: Publish immutable verified assets
+      - name: Publish verified versioned assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           version=$(node -p "require('./package.json').version")
           tag="v$version"
+          # --target only controls creation of a missing tag. The full checkout
+          # includes existing tags; peel annotated tags before comparing commits.
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            tag_sha=$(git rev-parse --verify "refs/tags/$tag^{commit}")
+            tested_sha=$(git rev-parse --verify "$GITHUB_SHA^{commit}")
+            if [[ "$tag_sha" != "$tested_sha" ]]; then
+              echo "Release tag $tag points to $tag_sha, but CI verified $tested_sha."
+              exit 1
+            fi
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "This version has already been published. Bump package.json before a new release."
             exit 1

@@ -10,6 +10,8 @@ Get available, verified packages from [GitHub Releases](https://github.com/OxSag
 
 Windows release assets include an NSIS installer, a portable ZIP, and `SHA256SUMS.txt`. Release automation requires unit checks, real Electron tests on Windows, package construction, packaged application launch, and installed application launch before publishing. Unsigned builds may trigger Windows warnings. No signing certificate is bundled or invented.
 
+The [recorded Windows candidate](docs/verification.md) passed **377 unit tests and 55 native Electron tests**, including all selectable browser counts, 20 concurrent proxy-backed profiles, three real scheduling cycles, profile cleanup and injected renderer crashes. Its actual portable ZIP and installed app both launched successfully with sandboxing and context isolation enabled. The final release workflow repeats these gates at the exact merged commit. The installer is unsigned; the 24-hour and consumer-device acceptance limits below remain open.
+
 ## What it does
 
 - Displays a responsive grid of independent, persistent Chromium sessions with address bars, navigation controls, expanded inspection, and individual or global run controls.
@@ -40,7 +42,7 @@ Free public proxies may be unavailable, slow, misclassified, or hostile. No numb
 
 Application-level network safeguards are not an operating-system firewall or a complete traffic-capture audit. UDP/WebRTC and DNS controls have compatibility implications described in [security](docs/security.md). Sites may reject synthetic traffic, require unsupported browser features, or behave differently from branded Chrome. HTTP 401/403/429 responses stop testing instead of triggering proxy rotation.
 
-The 24-hour soak test, Windows 10 consumer-device matrix, and independent packet-level leak audit remain separate acceptance work. Do not infer their completion from a successful build. See [testing](docs/testing.md) and [performance](docs/performance.md).
+The 24-hour soak test, Windows 10/11 consumer-device matrix, and independent packet-level leak audit remain separate acceptance work. Do not infer their completion from a successful build. See [testing](docs/testing.md) and [performance](docs/performance.md).
 
 ## Develop
 
@@ -65,6 +67,7 @@ Application source is TypeScript; the UI is React/Vite. Settings, queue state, b
 - [Security and network boundaries](docs/security.md)
 - [Proxy provider contract](docs/proxy-contract.md)
 - [Testing and evidence](docs/testing.md)
+- [Windows verification record and measurements](docs/verification.md)
 - [Requirement acceptance matrix](docs/acceptance.md)
 - [Dependency audit assessment](docs/dependency-audit.md)
 - [Performance and soak testing](docs/performance.md)

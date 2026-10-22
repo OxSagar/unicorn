@@ -1,0 +1,971 @@
+{
+  "scope": "Verified pre-merge source candidate; published release artifacts are rebuilt and reverified at the exact merge commit.",
+  "sourceCommit": "8dd07f0ebf4798df2362dc2f4810946123645087",
+  "runId": 39720790456,
+  "runUrl": "https://github.com/OxSagar/unicorn/actions/runs/39720790456",
+  "unitTests": {
+    "total": 377,
+    "failures": 0,
+    "errors": 0
+  },
+  "native": {
+    "metadata": {
+      "commitHref": "https://github.com/OxSagar/unicorn/commit/8dd07f0ebf4798df2362dc2f4810946123645087",
+      "commitHash": "8dd07f0ebf4798df2362dc2f4810946123645087",
+      "buildHref": "https://github.com/OxSagar/unicorn/actions/runs/39720790456"
+    },
+    "stats": {
+      "total": 55,
+      "expected": 55,
+      "unexpected": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "ok": true
+    },
+    "durationMs": 304690.721,
+    "tests": [
+      {
+        "file": "browser.spec.ts",
+        "title": "real JavaScript, Fetch, IndexedDB, CacheStorage, service worker and isolated privileged APIs",
+        "outcome": "expected",
+        "durationMs": 6362,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 6362,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "browser.spec.ts",
+        "title": "profile storage is isolated and survives an application restart",
+        "outcome": "expected",
+        "durationMs": 3205,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 3205,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "browser.spec.ts",
+        "title": "desktop, mobile and tablet change real viewport, DPR and touch behavior without clearing storage",
+        "outcome": "expected",
+        "durationMs": 1446,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1446,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "browser.spec.ts",
+        "title": "permitted popups retain parent session and proxy and can be dismissed",
+        "outcome": "expected",
+        "durationMs": 1859,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1859,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "browser.spec.ts",
+        "title": "authorized QA stages complete, collect errors and skip unapproved external links",
+        "outcome": "expected",
+        "durationMs": 2194,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 2194,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "browser.spec.ts",
+        "title": "HTTPS is certificate verified through CONNECT and WebSockets execute in Chromium",
+        "outcome": "expected",
+        "durationMs": 1426,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1426,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "browser.spec.ts",
+        "title": "1 real sessions navigate concurrently through unique proxies",
+        "outcome": "expected",
+        "durationMs": 1533,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1533,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "browser.spec.ts",
+        "title": "5 real sessions navigate concurrently through unique proxies",
+        "outcome": "expected",
+        "durationMs": 4099,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 4099,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "browser.spec.ts",
+        "title": "10 real sessions navigate concurrently through unique proxies",
+        "outcome": "expected",
+        "durationMs": 8198,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 8198,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "browser.spec.ts",
+        "title": "15 real sessions navigate concurrently through unique proxies",
+        "outcome": "expected",
+        "durationMs": 9981,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 9981,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "browser.spec.ts",
+        "title": "20 real sessions navigate concurrently through unique proxies",
+        "outcome": "expected",
+        "durationMs": 12692,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 12692,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "browser.spec.ts",
+        "title": "all browser counts 1\u201320 can be created, resized and closed with no orphaned views",
+        "outcome": "expected",
+        "durationMs": 7218,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 7218,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "challenges.spec.ts",
+        "title": "challenge-title stops QA without interaction, proxy rotation or an active lease",
+        "outcome": "expected",
+        "durationMs": 1654,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1654,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "challenges.spec.ts",
+        "title": "challenge-widget stops QA without interaction, proxy rotation or an active lease",
+        "outcome": "expected",
+        "durationMs": 1689,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1689,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "challenges.spec.ts",
+        "title": "challenge-delayed stops QA without interaction, proxy rotation or an active lease",
+        "outcome": "expected",
+        "durationMs": 3140,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 3140,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "challenges.spec.ts",
+        "title": "a hidden widget does not classify an ordinary fixture as a visible challenge",
+        "outcome": "expected",
+        "durationMs": 1629,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1629,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "failures.spec.ts",
+        "title": "missing proxies leave the browser waiting and block even a direct WebContents load",
+        "outcome": "expected",
+        "durationMs": 928,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 928,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "failures.spec.ts",
+        "title": "wrong-country verification refuses the endpoint before any page navigation",
+        "outcome": "expected",
+        "durationMs": 920,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 920,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "failures.spec.ts",
+        "title": "slow proxy verification times out without issuing a site request",
+        "outcome": "expected",
+        "durationMs": 2409,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 2409,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "failures.spec.ts",
+        "title": "untrusted HTTPS diagnostic certificate is rejected",
+        "outcome": "expected",
+        "durationMs": 908,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 908,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "failures.spec.ts",
+        "title": "failed proxy cannot fall back to a direct socket or leave an active lease",
+        "outcome": "expected",
+        "durationMs": 1461,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1461,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "failures.spec.ts",
+        "title": "HTTP 403 stops QA without rotating proxies",
+        "outcome": "expected",
+        "durationMs": 1133,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1133,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "failures.spec.ts",
+        "title": "HTTP 429 stops QA without rotating proxies",
+        "outcome": "expected",
+        "durationMs": 1101,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1101,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "failures.spec.ts",
+        "title": "unsafe URL, out-of-scope redirect and unapproved popup are rejected",
+        "outcome": "expected",
+        "durationMs": 1269,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1269,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "failures.spec.ts",
+        "title": "navigation timeout is bounded and leaves the desktop bridge responsive",
+        "outcome": "expected",
+        "durationMs": 1982,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1982,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "failures.spec.ts",
+        "title": "emergency stop cancels an active QA job and releases its network resources",
+        "outcome": "expected",
+        "durationMs": 1442,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1442,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "failures.spec.ts",
+        "title": "pausing a QA job preserves remaining dwell and resumes cleanly",
+        "outcome": "expected",
+        "durationMs": 4836,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 4836,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "failures.spec.ts",
+        "title": "renderer crash is contained and reopening preserves the profile",
+        "outcome": "expected",
+        "durationMs": 1396,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1396,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "leaks.spec.ts",
+        "title": "real Chromium ICE gathering sends no direct UDP to a controlled loopback STUN trap",
+        "outcome": "expected",
+        "durationMs": 4455,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 4455,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "policies.spec.ts",
+        "title": "an approved external stage navigates to a distinct hostname after the internal stage",
+        "outcome": "expected",
+        "durationMs": 2222,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 2222,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "policies.spec.ts",
+        "title": "a page without an internal link skips that stage and completes cleanly",
+        "outcome": "expected",
+        "durationMs": 1675,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1675,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "policies.spec.ts",
+        "title": "an excluded internal link never receives a request",
+        "outcome": "expected",
+        "durationMs": 1821,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1821,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "policies.spec.ts",
+        "title": "an excluded starting URL fails before proxy allocation or page traffic",
+        "outcome": "expected",
+        "durationMs": 890,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 890,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "policies.spec.ts",
+        "title": "a daily request limit of three stops a scripted fetch burst without proxy rotation",
+        "outcome": "expected",
+        "durationMs": 1657,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1657,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "policies.spec.ts",
+        "title": "an external-stage HTTP 403 cancels the actual restricted host and preserves unrelated pending work",
+        "outcome": "expected",
+        "durationMs": 2788,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 2788,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "policies.spec.ts",
+        "title": "one cached proxy connection failure retries through one verified replacement and completes",
+        "outcome": "expected",
+        "durationMs": 2993,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 2993,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "profiles.spec.ts",
+        "title": "storage inspection reports real profile bytes without stopping a browser or changing its data",
+        "outcome": "expected",
+        "durationMs": 2095,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 2095,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "profiles.spec.ts",
+        "title": "clearing cookies preserves other site data, history, device emulation and the sibling profile",
+        "outcome": "expected",
+        "durationMs": 2035,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 2035,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "profiles.spec.ts",
+        "title": "clearing HTTP cache forces a fresh response while preserving CacheStorage and other profile data",
+        "outcome": "expected",
+        "durationMs": 2130,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 2130,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "profiles.spec.ts",
+        "title": "clearing history clears saved entries and native back/forward controls without deleting site data",
+        "outcome": "expected",
+        "durationMs": 1924,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1924,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "profiles.spec.ts",
+        "title": "clearing permissions enforces default-deny website requests while preserving stored data and emulation",
+        "outcome": "expected",
+        "durationMs": 2110,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 2110,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "profiles.spec.ts",
+        "title": "full reset clears cookies, local storage, IndexedDB, CacheStorage, service workers and history, restores desktop, and persists",
+        "outcome": "expected",
+        "durationMs": 3185,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 3185,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "protocols.spec.ts",
+        "title": "SOCKS5 performs a real handshake and proxies browser requests and HTTPS validation",
+        "outcome": "expected",
+        "durationMs": 1266,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1266,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "protocols.spec.ts",
+        "title": "HTTPS proxy uses a trusted TLS connection to the proxy and an HTTPS tunnel to the site",
+        "outcome": "expected",
+        "durationMs": 1123,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1123,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "recovery.spec.ts",
+        "title": "a real renderer crash completes the original job once and retains its isolated profile",
+        "outcome": "expected",
+        "durationMs": 5619,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 5619,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "recovery.spec.ts",
+        "title": "Pause holds renderer recovery and Resume completes the same job",
+        "outcome": "expected",
+        "durationMs": 6598,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 6598,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "recovery.spec.ts",
+        "title": "Stop cancels a pending recovery without replaying the page or quarantining its healthy proxy",
+        "outcome": "expected",
+        "durationMs": 2615,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 2615,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "recovery.spec.ts",
+        "title": "repeated native crashes stop at the configured retry limit",
+        "outcome": "expected",
+        "durationMs": 6141,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 6141,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "recovery.spec.ts",
+        "title": "retry limit zero fails the original QA job and keeps the dashboard responsive",
+        "outcome": "expected",
+        "durationMs": 1233,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1233,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "stability.spec.ts",
+        "title": "twenty profiles complete three real minute-interval QA cycles from one Start command",
+        "outcome": "expected",
+        "durationMs": 142813,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 142813,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "ui.spec.ts",
+        "title": "UI distribution prepares real jobs and Start executes them through the browser engine",
+        "outcome": "expected",
+        "durationMs": 3537,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 3537,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "ui.spec.ts",
+        "title": "original URL drafts survive import, distribution, page changes and restart until explicitly cleared",
+        "outcome": "expected",
+        "durationMs": 4895,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 4895,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "ui.spec.ts",
+        "title": "pending queue edits support Cancel, reject unapproved URLs and wait for Start before browsing",
+        "outcome": "expected",
+        "durationMs": 2850,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 2850,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "ui.spec.ts",
+        "title": "native browser views stay inside the workspace and hide under dialogs and other pages",
+        "outcome": "expected",
+        "durationMs": 1940,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 1940,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      },
+      {
+        "file": "ui.spec.ts",
+        "title": "device and settings pages apply validated changes, including light theme, without fake state",
+        "outcome": "expected",
+        "durationMs": 2700,
+        "results": [
+          {
+            "status": "passed",
+            "duration": 2700,
+            "retry": 0,
+            "errors": []
+          }
+        ]
+      }
+    ],
+    "concurrency": [
+      {
+        "count": 1,
+        "loadMs": 122,
+        "uiRoundtripMs": 5,
+        "platform": "win32",
+        "hardware": {
+          "osRelease": "10.0.26100",
+          "osVersion": "Windows Server 2025 Datacenter",
+          "cpuModel": "AMD EPYC 9V45 96-Core Processor                ",
+          "logicalCpuCount": 4,
+          "totalMemoryMb": 16379
+        },
+        "cpuPercentSum": 17.594,
+        "workingSetMiB": 402.086,
+        "processCount": 5
+      },
+      {
+        "count": 5,
+        "loadMs": 1008,
+        "uiRoundtripMs": 6,
+        "platform": "win32",
+        "hardware": {
+          "osRelease": "10.0.26100",
+          "osVersion": "Windows Server 2025 Datacenter",
+          "cpuModel": "AMD EPYC 9V45 96-Core Processor                ",
+          "logicalCpuCount": 4,
+          "totalMemoryMb": 16379
+        },
+        "cpuPercentSum": 18.635,
+        "workingSetMiB": 788.234,
+        "processCount": 9
+      },
+      {
+        "count": 10,
+        "loadMs": 2916,
+        "uiRoundtripMs": 7,
+        "platform": "win32",
+        "hardware": {
+          "osRelease": "10.0.26100",
+          "osVersion": "Windows Server 2025 Datacenter",
+          "cpuModel": "AMD EPYC 9V45 96-Core Processor                ",
+          "logicalCpuCount": 4,
+          "totalMemoryMb": 16379
+        },
+        "cpuPercentSum": 10.584,
+        "workingSetMiB": 1291.266,
+        "processCount": 14
+      },
+      {
+        "count": 15,
+        "loadMs": 4013,
+        "uiRoundtripMs": 11,
+        "platform": "win32",
+        "hardware": {
+          "osRelease": "10.0.26100",
+          "osVersion": "Windows Server 2025 Datacenter",
+          "cpuModel": "AMD EPYC 9V45 96-Core Processor                ",
+          "logicalCpuCount": 4,
+          "totalMemoryMb": 16379
+        },
+        "cpuPercentSum": 10.841,
+        "workingSetMiB": 1793.043,
+        "processCount": 19
+      },
+      {
+        "count": 20,
+        "loadMs": 4991,
+        "uiRoundtripMs": 14,
+        "platform": "win32",
+        "hardware": {
+          "osRelease": "10.0.26100",
+          "osVersion": "Windows Server 2025 Datacenter",
+          "cpuModel": "AMD EPYC 9V45 96-Core Processor                ",
+          "logicalCpuCount": 4,
+          "totalMemoryMb": 16379
+        },
+        "cpuPercentSum": 14.374,
+        "workingSetMiB": 2287.645,
+        "processCount": 24
+      }
+    ],
+    "stability": {
+      "scope": "Three real scheduled cycles; not a 24-hour endurance or stable-memory claim",
+      "platform": "win32",
+      "hardware": {
+        "osRelease": "10.0.26100",
+        "osVersion": "Windows Server 2025 Datacenter",
+        "cpuModel": "AMD EPYC 9V45 96-Core Processor                ",
+        "logicalCpuCount": 4,
+        "totalMemoryMb": 16379
+      },
+      "manualStarts": 1,
+      "elapsedMs": 141840,
+      "directRequests": 0,
+      "samples": 69,
+      "jobs": 60,
+      "jobStates": {
+        "completed": 60
+      },
+      "storageMarkerCycles": 3,
+      "minimumRecurrenceGapMs": 60641,
+      "maximumRecurrenceGapMs": 61288,
+      "initialWorkingSetMiB": 1860,
+      "finalWorkingSetMiB": 1510,
+      "peakWorkingSetMiB": 2084,
+      "medianCpuPercent": 0.4,
+      "maximumCpuPercent": 20.3,
+      "medianUiRoundtripMs": 18.12660000001779,
+      "maximumUiRoundtripMs": 81.89200000002165,
+      "processCounts": [24],
+      "initialHeartbeat": 2,
+      "finalHeartbeat": 69,
+      "peakEventLoopDelayMs": 40,
+      "peakLeases": 20,
+      "finalLeases": 0
+    },
+    "leak": {
+      "scope": "One controlled IPv4 loopback STUN destination; not a system-wide packet or DNS audit",
+      "policy": "disable_non_proxied_udp",
+      "controlReceived": true,
+      "socketErrors": [],
+      "receivedDatagrams": [],
+      "observation": {
+        "started": true,
+        "completed": true,
+        "state": "complete",
+        "offer": true,
+        "candidateProtocols": [],
+        "elapsedMs": 3007.899999999994
+      }
+    }
+  },
+  "portableSmoke": {
+    "version": "1.0.0-rc.1",
+    "platform": "win32",
+    "windowReady": true,
+    "browsers": 4,
+    "sandbox": true,
+    "contextIsolation": true,
+    "at": "2026-10-22T04:16:59.392Z",
+    "archive": "Unicorn-Portable-v1.0.0-rc.1-x64.zip",
+    "extractedArchiveLaunched": true
+  },
+  "installedSmoke": {
+    "version": "1.0.0-rc.1",
+    "platform": "win32",
+    "windowReady": true,
+    "browsers": 4,
+    "sandbox": true,
+    "contextIsolation": true,
+    "at": "2026-10-22T04:17:19.602Z"
+  },
+  "candidatePackages": [
+    {
+      "filename": "Unicorn-Setup-v1.0.0-rc.1-x64.exe",
+      "bytes": 112956650,
+      "sha256": "3dff9fa26e45aaadc736c3b65cf19aa9c4e2c09179dd9a46cff0a594dd8e1846",
+      "authenticodeStatus": "NotSigned"
+    },
+    {
+      "filename": "Unicorn-Portable-v1.0.0-rc.1-x64.zip",
+      "bytes": 154741047,
+      "sha256": "c7646c2f08054f19a1a1ee9af80f43a2b6717d8eafa4811fc1ac73e2ca4c23ba",
+      "authenticodeStatus": null
+    }
+  ],
+  "intentionalNativeRendererCrashes": 8,
+  "artifacts": {
+    "unitReports": 12400579320,
+    "windowsReports": 12400274671,
+    "windowsPackages": 12400334368
+  }
+}
