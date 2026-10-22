@@ -1,417 +1,401 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AppCommand, AppSnapshot, CommandResult } from '../shared/types';
 import BrowserGrid from './BrowserGrid';
-import LinksPage from './LinksPage';
-import ProxiesPage from './ProxiesPage';
-import SettingsPage from './SettingsPage';
-import { Badge, Brand, Button, Icon, IconButton } from './components';
-import type { IconName } from './components';
-import type { Page, PageProps } from './ui-types';
+import { Brand, Button, Icon } from './components';
+import { useLinkDraft } from './use-link-draft';
 
-const navigation: Array<{ id: Page; label: string; icon: IconName }> = [
-  { id: 'browsers', label: 'Browsers', icon: 'browser' },
-  { id: 'links', label: 'Links', icon: 'link' },
-  { id: 'proxies', label: 'Proxies', icon: 'shield' },
-  { id: 'settings', label: 'Settings', icon: 'settings' },
-];
-type Notice = { id: number; message: string; level: 'success' | 'error' };
-type Dialog = { title: string; content: ReactNode; action?: () => void; destructive?: boolean };
+type Device = 'desktop' | 'mobile' | 'tablet';
+type ReviewBinding = { id: string; text: string; count: number; device: Device };
+type Operation = 'distributing' | 'starting' | 'stopping' | null;
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [connectionError, setConnectionError] = useState('');
-  const [page, setPage] = useState<Page>('browsers');
-  const [selected, setSelected] = useState<number[]>([]);
-  const [browserCount, setBrowserCount] = useState(4);
-  const [pendingCommands, setPendingCommands] = useState(0);
-  const [notices, setNotices] = useState<Notice[]>([]);
-  const [dialog, setDialog] = useState<Dialog | null>(null);
+  const [error, setError] = useState('');
+  const [pending, setPending] = useState(0);
+  const [operation, setOperation] = useState<Operation>(null);
+  const [reviewed, setReviewed] = useState<ReviewBinding | null>(null);
+  const [count, setCount] = useState(1);
+  const [device, setDevice] = useState<Device>('desktop');
   const initialized = useRef(false);
-  const snapshotRef = useRef(snapshot);
-  const noticeSequence = useRef(0);
-  const dialogRef = useRef<HTMLDivElement>(null);
-  snapshotRef.current = snapshot;
-  const addNotice = useCallback((message: string, level: Notice['level']) => {
-    setNotices((previous) => [...previous, { id: ++noticeSequence.current, message, level }].slice(-2));
-  }, []);
-  const ingestSnapshot = useCallback((next: AppSnapshot) => {
+  const choiceRevision = useRef(0);
+  const choices = useRef({ count, device });
+  choices.current = { count, device };
+  const generation = useRef(0);
+  const scrollRoot = useRef<HTMLElement>(null);
+  const draft = useLinkDraft();
+
+  const ingest = useCallback((next: AppSnapshot) => {
     setSnapshot(next);
     setConnectionError('');
     if (!initialized.current) {
       initialized.current = true;
-      setBrowserCount(next.settings.browserCount);
-      setSelected(next.browsers.map((b) => b.id));
-    } else
-      setSelected((current) => current.filter((id) => next.browsers.some((browser) => browser.id === id)));
+      setCount(next.settings.browserCount);
+      const saved = next.browsers.filter((browser) => browser.id <= next.settings.browserCount);
+      const preset = saved[0]?.device.preset;
+      if (
+        preset &&
+        ['desktop', 'mobile', 'tablet'].includes(preset) &&
+        saved.every((browser) => browser.device.preset === preset)
+      )
+        setDevice(preset as Device);
+    }
   }, []);
-  const run = useCallback(
-    async (command: AppCommand, success?: string): Promise<CommandResult | undefined> => {
+
+  const request = useCallback(
+    async (command: AppCommand, epoch = generation.current): Promise<CommandResult | undefined> => {
       if (!window.unicorn) {
-        addNotice('Open Unicorn as the desktop application to use browser controls.', 'error');
+        setConnectionError('Open the Unicorn desktop application to run your links.');
         return;
       }
-      setPendingCommands((value) => value + 1);
+      setPending((count) => count + 1);
       try {
         const result = await window.unicorn.invoke(command);
-        ingestSnapshot(result.snapshot);
-        if (result.message || success) addNotice(result.message || success!, 'success');
+        if (epoch !== generation.current) return;
+        ingest(result.snapshot);
         return result;
-      } catch (error) {
-        addNotice(
-          error instanceof Error
-            ? error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
-            : String(error),
-          'error',
-        );
-        return undefined;
+      } catch (cause) {
+        if (epoch === generation.current)
+          setError(
+            cause instanceof Error
+              ? cause.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
+              : String(cause),
+          );
       } finally {
-        setPendingCommands((value) => Math.max(0, value - 1));
+        setPending((count) => Math.max(0, count - 1));
       }
     },
-    [addNotice, ingestSnapshot],
+    [ingest],
   );
+
   useEffect(() => {
     if (!window.unicorn) {
-      setConnectionError(
-        'This interface runs inside the Unicorn Windows desktop application. Launch Unicorn to access the Chromium browser engine.',
-      );
+      setConnectionError('Open the Unicorn desktop application to run your links and see live browsers.');
       return;
     }
-    let cancelled = false;
+    let mounted = true;
     const unsubscribe = window.unicorn.subscribe((next) => {
-      if (!cancelled) ingestSnapshot(next);
+      if (mounted) ingest(next);
     });
-    void window.unicorn
-      .invoke({ type: 'snapshot' })
-      .then((result) => {
-        if (!cancelled) ingestSnapshot(result.snapshot);
-      })
-      .catch((error) => {
-        if (!cancelled) setConnectionError(String(error));
-      });
+    void window.unicorn.invoke({ type: 'snapshot' }).then(
+      (result) => {
+        if (mounted) ingest(result.snapshot);
+      },
+      (cause) => {
+        if (mounted) setConnectionError(String(cause));
+      },
+    );
     return () => {
-      cancelled = true;
+      mounted = false;
       unsubscribe();
     };
-  }, [ingestSnapshot]);
+  }, [ingest]);
+
   useEffect(() => {
     document.documentElement.dataset.theme = snapshot?.settings.theme || 'dark';
   }, [snapshot?.settings.theme]);
-  const hideViews = useCallback(() => {
-    window.unicorn?.layout(
-      (snapshotRef.current?.browsers || []).map((b) => ({
-        id: b.id,
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-        visible: false,
-      })),
-    );
-  }, []);
-  const navigatePage = useCallback(
-    (next: Page) => {
-      if (next !== 'browsers') hideViews();
-      setPage(next);
-    },
-    [hideViews],
-  );
-  const confirm = useCallback(
-    (title: string, message: string, action: () => void, destructive = false) => {
-      hideViews();
-      setDialog({ title, content: <p>{message}</p>, action, destructive });
-    },
-    [hideViews],
-  );
-  const inspect = useCallback(
-    (title: string, content: ReactNode) => {
-      hideViews();
-      setDialog({ title, content });
-    },
-    [hideViews],
-  );
-  useEffect(() => {
-    if (dialog) dialogRef.current?.focus();
-  }, [dialog]);
+
+  const stop = useCallback(async () => {
+    const epoch = ++generation.current;
+    setReviewed(null);
+    setError('');
+    setOperation('stopping');
+    await request({ type: 'global', action: 'stop' }, epoch);
+    if (epoch === generation.current) setOperation(null);
+  }, [request]);
+
   useEffect(() => {
     const emergency = (event: KeyboardEvent) => {
       if (event.ctrlKey && event.shiftKey && event.code === 'KeyS') {
         event.preventDefault();
-        void run({ type: 'global', action: 'stop' });
+        void stop();
       }
     };
     window.addEventListener('keydown', emergency);
     return () => window.removeEventListener('keydown', emergency);
-  }, [run]);
+  }, [stop]);
+
+  const plan = snapshot?.preparedRun ?? null;
+  const jobs = useMemo(() => {
+    const ids = new Set(plan?.jobIds ?? []);
+    return snapshot?.jobs.filter((job) => ids.has(job.id)) ?? [];
+  }, [plan, snapshot?.jobs]);
+  const browserIds = useMemo(() => new Set(plan?.browserIds ?? []), [plan]);
+  const browsers = snapshot?.browsers.filter((browser) => browserIds.has(browser.id)) ?? [];
+  const busy = pending > 0;
+  const active = Boolean(
+    plan?.status === 'running' ||
+    snapshot?.scheduler.running ||
+    snapshot?.scheduler.paused ||
+    operation === 'starting',
+  );
+  const sameDraft = Boolean(
+    reviewed &&
+    reviewed.id === plan?.id &&
+    reviewed.text === draft.text &&
+    reviewed.count === count &&
+    reviewed.device === device,
+  );
+  const canStart = Boolean(
+    !busy &&
+    sameDraft &&
+    plan &&
+    (plan.status === 'ready' || (plan.status === 'running' && snapshot?.scheduler.paused)),
+  );
+  const canDistribute = Boolean(draft.text.trim() && !draft.tooLarge && !busy && !active);
+  const completed = jobs.filter((job) => job.status === 'completed').length;
+  const failed = jobs.filter((job) => job.status === 'failed').length;
+  const cancelled = jobs.filter((job) => job.status === 'cancelled').length;
+  const waiting = browsers.some((browser) =>
+    ['WAITING_FOR_PROXY', 'ASSIGNING_PROXY', 'RETRY_WAIT'].includes(browser.state),
+  );
+  const knownJobs = plan && jobs.length === plan.jobIds.length;
+  const status =
+    operation === 'distributing'
+      ? 'Distributing links'
+      : operation === 'stopping'
+        ? 'Stopping'
+        : snapshot?.scheduler.paused
+          ? 'Paused'
+          : active
+            ? waiting
+              ? 'Waiting for a proxy'
+              : 'Running'
+            : plan?.status === 'finished'
+              ? failed || cancelled
+                ? 'Finished with issues'
+                : 'Finished'
+              : canStart
+                ? 'Ready to start'
+                : 'Ready';
+
+  const distribute = async () => {
+    if (!canDistribute) return;
+    const epoch = generation.current;
+    const submitted = draft.current.current;
+    const submittedCount = count;
+    const submittedDevice = device;
+    const submittedRevision = choiceRevision.current;
+    setReviewed(null);
+    setError('');
+    setOperation('distributing');
+    draft.persist();
+    const result = await request(
+      { type: 'simple-distribute', text: submitted, count: submittedCount, device: submittedDevice },
+      epoch,
+    );
+    if (epoch !== generation.current) return;
+    setOperation(null);
+    const prepared = result?.snapshot.preparedRun;
+    if (
+      prepared?.status === 'ready' &&
+      choiceRevision.current === submittedRevision &&
+      draft.current.current === submitted &&
+      choices.current.count === submittedCount &&
+      choices.current.device === submittedDevice &&
+      prepared.count === submittedCount &&
+      prepared.device === submittedDevice
+    )
+      setReviewed({ id: prepared.id, text: submitted, count: submittedCount, device: submittedDevice });
+  };
+
+  const start = async () => {
+    if (!canStart || !plan) return;
+    const epoch = generation.current;
+    setError('');
+    setOperation('starting');
+    await request({ type: 'simple-start', reviewId: plan.id, confirmed: true }, epoch);
+    if (epoch === generation.current) setOperation(null);
+  };
+
   if (!snapshot)
     return (
       <main className="startup-screen">
         <Brand />
-        <div className="startup-card">
-          {connectionError ? (
-            <>
-              <Icon name="info" size={32} />
-              <h1>Desktop workspace unavailable</h1>
-              <p>{connectionError}</p>
-              {window.unicorn && (
-                <Button
-                  icon="reload"
-                  onClick={() => {
-                    setConnectionError('');
-                    void run({ type: 'snapshot' });
-                  }}
-                >
-                  Retry connection
-                </Button>
-              )}
-            </>
-          ) : (
-            <>
-              <div className="startup-spinner" />
-              <h1>Opening your workspace</h1>
-              <p>Loading persistent browser profiles and local settings…</p>
-            </>
+        <section className="startup-card">
+          <Icon name={connectionError ? 'info' : 'browser'} size={30} />
+          <h1>{connectionError ? 'Desktop application required' : 'Opening Unicorn'}</h1>
+          <p>{connectionError || 'Loading your saved workspace…'}</p>
+          {connectionError && window.unicorn && (
+            <Button onClick={() => void request({ type: 'snapshot' })}>Retry connection</Button>
           )}
-        </div>
-        <span className="startup-caption">INDEPENDENT PROFILES. ONE WORKSPACE.</span>
+        </section>
       </main>
     );
-  const queued = snapshot.jobs.filter((j) => j.status === 'pending').length;
-  const props: PageProps = {
-    snapshot,
-    selected,
-    setSelected,
-    run,
-    confirm,
-    inspect,
-    setPage: navigatePage,
-    busy: pendingCommands > 0,
-  };
-  const pageLabel = navigation.find((n) => n.id === page)?.label;
+
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div className="simple-app">
+      <header className="app-header">
         <Brand />
-        <nav aria-label="Main navigation">
-          {navigation.map((item) => (
-            <div key={item.id}>
-              <button
-                className={`nav-item ${page === item.id ? 'active' : ''}`}
-                onClick={() => navigatePage(item.id)}
-                aria-current={page === item.id ? 'page' : undefined}
-              >
-                <Icon name={item.icon} size={18} />
-                <span>{item.label}</span>
-                {item.id === 'browsers' && <span className="nav-count">{snapshot.browsers.length}</span>}
-                {item.id === 'links' && queued > 0 && <span className="nav-count">{queued}</span>}
-              </button>
-            </div>
-          ))}
-        </nav>
-        <div className="sidebar-footer">
-          <div className="proxy-mode">
-            <span className="status-dot" />
-            <strong>Proxy-only mode</strong>
-            <Icon name="shield" size={14} />
-          </div>
-          <p>API-listed proxies. Separate browser profiles.</p>
-          <div className="version-row">
-            <span>Unicorn v{snapshot.version}</span>
-            <span>CHROMIUM</span>
-          </div>
+        <div className="app-run-status" role="status" aria-live="polite">
+          <i className={active || busy ? 'active' : ''} aria-hidden="true" />
+          {status}
         </div>
-      </aside>
-      <div className="main-shell">
-        <header className="app-header">
-          <div className="breadcrumb">
-            <span>Workspace</span>
-            <Icon name="chevron" size={12} />
-            <strong>{pageLabel}</strong>
-          </div>
-          <div className="global-controls">
-            <label className="count-control">
-              <Icon name="browser" size={15} />
-              <span>Browsers</span>
-              <select
-                aria-label="Browser count"
-                value={browserCount}
-                onChange={(e) => setBrowserCount(Number(e.target.value))}
-              >
-                {Array.from({ length: 20 }, (_, i) => (
-                  <option value={i + 1} key={i}>
-                    {i + 1}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <Button
-              disabled={pendingCommands > 0}
-              onClick={() => {
-                if (browserCount < snapshot.browsers.length)
-                  confirm(
-                    'Resize browser workspace?',
-                    `The workspace will retain ${browserCount} open browsers. Closed profiles keep their data.`,
-                    () => void run({ type: 'create', count: browserCount }),
-                  );
-                else void run({ type: 'create', count: browserCount });
-              }}
-            >
-              Apply
-            </Button>
-            <span className="control-separator" />
-            <Button
-              icon="play"
-              variant="primary"
-              disabled={!snapshot.browsers.length}
-              onClick={() =>
-                void run({ type: 'global', action: snapshot.scheduler.paused ? 'resume' : 'start' })
-              }
-            >
-              {snapshot.scheduler.paused ? 'Resume all' : 'Start all'}
-            </Button>
-            <Button icon="pause" onClick={() => void run({ type: 'global', action: 'pause' })}>
-              Pause all
-            </Button>
-            <Button
-              icon="stop"
-              variant="danger"
-              title="Emergency stop all (Ctrl+Shift+S)"
-              onClick={() => void run({ type: 'global', action: 'stop' })}
-            >
-              Stop all
-            </Button>
-          </div>
-        </header>
-        {notices.length > 0 && (
-          <div className="notice-region" aria-live="polite">
-            {notices.map((notice) => (
-              <div key={notice.id} className={`notice ${notice.level}`}>
-                <Icon name={notice.level === 'error' ? 'info' : 'check'} size={17} />
-                <span>{notice.message}</span>
-                <IconButton
-                  icon="close"
-                  label="Dismiss notification"
-                  onClick={() => setNotices((current) => current.filter((n) => n.id !== notice.id))}
-                />
-              </div>
-            ))}
-          </div>
-        )}
-        <main className={`main-content ${page === 'browsers' ? 'workspace-page' : ''}`}>
-          {page === 'browsers' && (
-            <>
-              <div className="dashboard-heading">
-                <div>
-                  <h1>Browsers</h1>
-                  <p>Browse independently or add links to run a queue.</p>
-                </div>
-                <div className="workspace-health">
-                  <span className={`status-dot ${snapshot.scheduler.running ? 'running' : ''}`} />
-                  <span>
-                    {snapshot.scheduler.paused
-                      ? 'Tests paused'
-                      : snapshot.scheduler.running
-                        ? 'Tests running'
-                        : 'Workspace ready'}
-                  </span>
-                  <Badge>{queued} queued</Badge>
-                </div>
-              </div>
-              {(!snapshot.settings.authorizedDomains.length || !snapshot.settings.stagingConfirmed) && (
-                <div className="scope-banner">
-                  <div className="scope-icon">
-                    <Icon name="shield" size={19} />
-                  </div>
-                  <div>
-                    <strong>Choose your approved websites</strong>
-                    <span>
-                      Add approved domains and confirm your staging or test-ad environment before starting
-                      automated runs.
-                    </span>
-                  </div>
-                  <Button icon="arrow" variant="ghost" onClick={() => navigatePage('settings')}>
-                    Open settings
-                  </Button>
-                </div>
-              )}
-              <BrowserGrid {...props} blocked={!!dialog} />
-            </>
-          )}
-          {page === 'links' && <LinksPage {...props} />}
-          {page === 'proxies' && <ProxiesPage {...props} />}
-          {page === 'settings' && <SettingsPage {...props} />}
-        </main>
-        <footer className="app-statusbar">
-          <span>
-            <i className={`status-dot ${pendingCommands ? 'working' : ''}`} />
-            {pendingCommands ? 'Working…' : 'Local workspace connected'}
-          </span>
-          <span>
-            {snapshot.browsers.length} profiles<span className="statusbar-separator">·</span>JavaScript
-            enabled<span className="statusbar-separator">·</span>Proxy required
-          </span>
-        </footer>
-      </div>
-      {dialog && (
-        <div
-          className="dialog-backdrop"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setDialog(null);
-          }}
-        >
-          <div
-            className="dialog"
-            ref={dialogRef}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="dialog-title"
-            tabIndex={-1}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') setDialog(null);
-              if (e.key === 'Tab') {
-                const items = dialogRef.current?.querySelectorAll<HTMLElement>(
-                  'button:not(:disabled), a[href], input, select, textarea, [tabindex="0"]',
-                );
-                if (!items?.length) return;
-                const first = items[0],
-                  last = items[items.length - 1];
-                if (
-                  e.shiftKey &&
-                  (document.activeElement === first || document.activeElement === dialogRef.current)
-                ) {
-                  e.preventDefault();
-                  last.focus();
-                } else if (!e.shiftKey && document.activeElement === last) {
-                  e.preventDefault();
-                  first.focus();
-                }
-              }
-            }}
-          >
-            <header>
-              <h2 id="dialog-title">{dialog.title}</h2>
-              <IconButton icon="close" label="Close dialog" onClick={() => setDialog(null)} />
-            </header>
-            <div className="dialog-content">{dialog.content}</div>
-            <footer>
-              <Button onClick={() => setDialog(null)}>{dialog.action ? 'Cancel' : 'Close'}</Button>
-              {dialog.action && (
-                <Button
-                  variant={dialog.destructive ? 'danger' : 'primary'}
-                  onClick={() => {
-                    const action = dialog.action;
-                    setDialog(null);
-                    action?.();
+      </header>
+      <main className="workspace-scroll browser-scroll" ref={scrollRoot}>
+        <div className="workspace-content">
+          <section className="link-composer" aria-labelledby="workspace-title">
+            <div className="composer-heading">
+              <h1 id="workspace-title">Paste. Distribute. Start.</h1>
+            </div>
+            <div className="browser-choices">
+              <label>
+                <span>Browser count</span>
+                <select
+                  aria-label="Browser count"
+                  value={count}
+                  disabled={active}
+                  onChange={(event) => {
+                    choiceRevision.current += 1;
+                    setCount(Number(event.target.value));
+                    setReviewed(null);
                   }}
                 >
-                  {dialog.destructive ? 'Confirm' : 'Continue'}
+                  {Array.from({ length: 20 }, (_, index) => (
+                    <option key={index + 1} value={index + 1}>
+                      {index + 1}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Device type</span>
+                <select
+                  aria-label="Device type"
+                  value={device}
+                  disabled={active}
+                  onChange={(event) => {
+                    choiceRevision.current += 1;
+                    setDevice(event.target.value as Device);
+                    setReviewed(null);
+                  }}
+                >
+                  <option value="desktop">Desktop</option>
+                  <option value="mobile">Mobile</option>
+                  <option value="tablet">Tablet</option>
+                </select>
+              </label>
+            </div>
+            <label className="paste-field">
+              <span>Paste links</span>
+              <textarea
+                aria-label="Paste links"
+                value={draft.text}
+                disabled={active}
+                onChange={(event) => {
+                  if (draft.update(event.target.value)) {
+                    choiceRevision.current += 1;
+                    setReviewed(null);
+                  }
+                }}
+                onBlur={() => draft.persist()}
+                placeholder={'https://staging.example.com/\nhttps://staging.example.com/products'}
+                spellCheck={false}
+                aria-describedby="link-input-help"
+              />
+            </label>
+            <div className="input-help" id="link-input-help">
+              <span>One complete HTTPS link per line.</span>
+              <span>
+                {draft.error
+                  ? 'Review your draft below'
+                  : draft.saved
+                    ? 'Saved on this computer'
+                    : 'Saving draft…'}
+              </span>
+            </div>
+            {draft.error && (
+              <p className="inline-error" role="alert">
+                {draft.error}
+              </p>
+            )}
+            {error && (
+              <div className="error-message" role="alert">
+                <Icon name="info" size={18} />
+                <p>{error}</p>
+              </div>
+            )}
+            {plan && (
+              <div className="assignment-summary" aria-label="Assigned links" data-review-id={plan.id}>
+                <div className="assignment-heading">
+                  <strong>
+                    {plan.urls.length} link{plan.urls.length === 1 ? '' : 's'} assigned to{' '}
+                    {plan.browserIds.length} browser{plan.browserIds.length === 1 ? '' : 's'}
+                    {' · '}
+                    {plan.device[0].toUpperCase() + plan.device.slice(1)}
+                  </strong>
+                  <span>
+                    {status}
+                    {knownJobs && active ? ` · ${completed} complete` : ''}
+                    {failed > 0 ? ` · ${failed} failed` : ''}
+                    {cancelled > 0 ? ` · ${cancelled} cancelled` : ''}
+                  </span>
+                </div>
+                <p className="review-domains">
+                  <span>Listed sites:</span> {plan.domains.join(', ')}
+                </p>
+              </div>
+            )}
+            <div className="composer-actions">
+              <div className="primary-actions">
+                <Button icon="arrow" disabled={!canDistribute} onClick={() => void distribute()}>
+                  Distribute
                 </Button>
-              )}
-            </footer>
-          </div>
+                <Button icon="play" variant="primary" disabled={!canStart} onClick={() => void start()}>
+                  Start
+                </Button>
+                {(active || busy) && (
+                  <Button
+                    icon="stop"
+                    variant="danger"
+                    title="Stop (Ctrl+Shift+S)"
+                    onClick={() => void stop()}
+                  >
+                    Stop
+                  </Button>
+                )}
+              </div>
+              <p className="run-help">
+                {operation === 'distributing'
+                  ? 'Preparing assignments. No pages open yet.'
+                  : snapshot.scheduler.paused && sameDraft
+                    ? 'Select Start to continue these reviewed links.'
+                    : plan?.status === 'ready' && !sameDraft
+                      ? 'Your choices changed or review ended. Select Distribute again.'
+                      : plan?.status === 'finished'
+                        ? 'Distribute again to prepare another run.'
+                        : active
+                          ? waiting
+                            ? 'Your run continues when an eligible proxy is available.'
+                            : 'You can stop this run at any time.'
+                          : canStart
+                            ? 'Assignments are ready. Select Start when you are ready.'
+                            : 'Distribute prepares your links without opening pages.'}
+              </p>
+            </div>
+            <p className="start-consent">
+              By selecting Start, you confirm you are authorized to run QA on only the listed sites in staging
+              or test-ad environments.
+            </p>
+            {active && snapshot.provider.error && waiting && (
+              <p className="inline-error" role="alert">
+                {snapshot.provider.error}
+              </p>
+            )}
+          </section>
+          <BrowserGrid
+            browsers={browsers}
+            allBrowserIds={snapshot.browsers.map((browser) => browser.id)}
+            jobs={jobs}
+            scrollRoot={scrollRoot}
+            blocked={plan?.status === 'ready'}
+          />
+          <footer className="app-footer">
+            <span>Unicorn {snapshot.version}</span>
+            <span>Automatic proxies · Separate browser profiles</span>
+          </footer>
         </div>
-      )}
+      </main>
     </div>
   );
 }

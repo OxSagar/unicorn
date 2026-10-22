@@ -21,6 +21,8 @@ export interface StoredData {
   settings: AppSettings;
   profiles: Record<number, StoredProfile>;
   jobs: TestJob[];
+  preservedJobs: TestJob[];
+  simpleJobIds: string[];
   scheduleTemplates: Array<{ browserId: number; url: string }>;
   budget?: BudgetSnapshot;
   requestBudget?: BudgetSnapshot;
@@ -33,6 +35,8 @@ export function initialData(): StoredData {
     settings: structuredClone(DEFAULT_SETTINGS),
     profiles: {},
     jobs: [],
+    preservedJobs: [],
+    simpleJobIds: [],
     scheduleTemplates: [],
     totals: { completed: 0, failed: 0, navigations: 0, jsErrors: 0, networkErrors: 0 },
     nextRunAt: null,
@@ -102,7 +106,11 @@ function restoreJobs(input: unknown, settings: AppSettings): TestJob[] {
   if (!Array.isArray(input)) return [];
   const jobs: TestJob[] = [];
   const ids = new Set<string>();
-  for (const record of input.slice(-1000)) {
+  let activeCount = 0;
+  let terminalCount = 0;
+  for (let index = input.length - 1; index >= 0; index--) {
+    if (activeCount === 1000 && terminalCount === 500) break;
+    const record = input[index];
     if (
       !object(record) ||
       typeof record.id !== 'string' ||
@@ -117,6 +125,8 @@ function restoreJobs(input: unknown, settings: AppSettings): TestJob[] {
       !timestamp(record.createdAt)
     )
       continue;
+    const active = record.status === 'pending' || record.status === 'running';
+    if ((active && activeCount === 1000) || (!active && terminalCount === 500)) continue;
     try {
       const job: TestJob = {
         id: record.id,
@@ -133,24 +143,20 @@ function restoreJobs(input: unknown, settings: AppSettings): TestJob[] {
       }
       jobs.push(job);
       ids.add(job.id);
+      if (active) activeCount++;
+      else terminalCount++;
     } catch {
       // Invalid queue rows are isolated from valid settings and jobs.
     }
   }
-  return jobs;
+  return jobs.reverse();
 }
 
 function restoreTemplates(input: unknown, settings: AppSettings): StoredData['scheduleTemplates'] {
   if (!Array.isArray(input)) return [];
   const templates: StoredData['scheduleTemplates'] = [];
   for (const record of input.slice(0, 1000)) {
-    if (
-      !object(record) ||
-      !browserId(record.browserId) ||
-      record.browserId > settings.browserCount ||
-      typeof record.url !== 'string'
-    )
-      continue;
+    if (!object(record) || !browserId(record.browserId) || typeof record.url !== 'string') continue;
     try {
       templates.push({ browserId: record.browserId, url: assertApproved(record.url, settings) });
     } catch {
@@ -197,6 +203,17 @@ export class LocalStore {
       value.settings = settings;
       value.profiles = restoreProfiles(parsed.profiles, settings);
       value.jobs = restoreJobs(parsed.jobs, settings);
+      value.preservedJobs = restoreJobs(parsed.preservedJobs, settings).slice(-1000);
+      const restoredIds = new Set(value.jobs.map((job) => job.id));
+      value.simpleJobIds = Array.isArray(parsed.simpleJobIds)
+        ? [
+            ...new Set(
+              parsed.simpleJobIds
+                .slice(0, 1000)
+                .filter((id): id is string => typeof id === 'string' && restoredIds.has(id)),
+            ),
+          ]
+        : [];
       value.scheduleTemplates = restoreTemplates(parsed.scheduleTemplates, settings);
       value.budget = restoreBudget(parsed.budget);
       value.requestBudget = restoreBudget(parsed.requestBudget);

@@ -9,12 +9,15 @@ import type {
   AppSnapshot,
   CommandResult,
   PerformanceSnapshot,
+  PreparedRun,
   ProxyRecord,
 } from '../shared/types';
+import { DEVICES } from '../shared/defaults';
 import { BrowserManager } from './browser/manager';
 import { ProxyPool, parseProxyScrape, proxyScrapeUrl } from './core/proxy';
 import { assertApproved, DomainBudget } from './core/scope';
 import { distribute, importUrls } from './core/distribution';
+import { prepareSimpleDistribution, simpleRunSettings } from './core/simple-run';
 import { inOperatingWindow } from './core/timing';
 import { validateSettings } from './core/validation';
 import { SiteRestrictionError } from './network/site-restriction';
@@ -25,6 +28,14 @@ export interface TestConfiguration {
   userData: string;
   settings?: Partial<AppSettings>;
   proxies: ProxyRecord[];
+}
+interface SimpleExecution {
+  reviewId: string;
+  browserIds: Set<number>;
+  jobIds: Set<string>;
+  settings: AppSettings;
+  revoked: boolean;
+  starting: boolean;
 }
 export class UnicornController {
   readonly manager: BrowserManager;
@@ -38,6 +49,13 @@ export class UnicornController {
   private paused = false;
   private scheduleArmed = false;
   private scheduleCancellationGeneration = 0;
+  private simpleGeneration = 0;
+  private preparingSimple = false;
+  private workspaceMutations = 0;
+  private preparedRun: PreparedRun | null = null;
+  private preparedAssignments: Array<{ id: string; browserId: number; url: string }> = [];
+  private simpleRun?: SimpleExecution;
+  private simpleStartAbort?: AbortController;
   private closing = false;
   private sendTimer?: ReturnType<typeof setTimeout>;
   private saveTimer?: ReturnType<typeof setTimeout>;
@@ -76,11 +94,12 @@ export class UnicornController {
   ) {
     this.budget = new DomainBudget(data.budget);
     this.requestBudget = new DomainBudget(data.requestBudget);
-    this.scheduleArmed = data.settings.schedule.enabled && data.settings.schedule.resumeAfterRestart;
+    // Opening the app never approves a saved queue or recurring schedule.
+    // Preferences and templates remain available for an explicit legacy action.
     this.pool = new ProxyPool();
     this.manager = new BrowserManager({
       window,
-      settings: () => this.data.settings,
+      settings: (id) => this.settingsFor(id),
       proxies: {
         acquire: async (id, signal) => {
           signal?.throwIfAborted();
@@ -111,17 +130,17 @@ export class UnicornController {
           this.logs.add('error', 'stop', String(error)),
         );
       },
-      navigationAllowed: (url) => {
+      navigationAllowed: (url, id) => {
         try {
-          this.budget.consume(url, this.data.settings.dailyNavigationLimit);
+          this.budget.consume(url, this.settingsFor(id).dailyNavigationLimit);
         } catch (error) {
           throw new SiteRestrictionError(error instanceof Error ? error.message : String(error), url);
         }
         this.persistSoon();
       },
-      requestAllowed: (url) => {
+      requestAllowed: (url, id) => {
         try {
-          this.requestBudget.consume(url, this.data.settings.dailyRequestLimit);
+          this.requestBudget.consume(url, this.settingsFor(id).dailyRequestLimit);
         } catch {
           throw new SiteRestrictionError(`Daily request limit reached for ${new URL(url).hostname}`, url);
         }
@@ -192,16 +211,23 @@ export class UnicornController {
       browsers: this.manager.snapshots(),
       proxies: this.pool.list(),
       jobs: structuredClone(this.data.jobs),
+      preservedJobs: structuredClone(this.data.preservedJobs),
+      preparedRun: structuredClone(this.preparedRun),
       logs: this.logs.list(),
       performance: { ...this.performance },
       provider: { ...this.provider },
       totals: { ...this.data.totals },
       scheduler: {
-        running: this.active.size > 0 || this.scheduleArmed,
+        running: this.active.size > 0 || this.scheduleArmed || this.preparedRun?.status === 'running',
         paused: this.paused,
         nextRunAt: this.scheduleArmed ? this.data.nextRunAt : null,
       },
     };
+  }
+  private settingsFor(id?: number): AppSettings {
+    return id !== undefined && this.simpleRun?.browserIds.has(id)
+      ? this.simpleRun.settings
+      : this.data.settings;
   }
   changed(): void {
     if (this.closing || this.sendTimer) return;
@@ -358,12 +384,207 @@ export class UnicornController {
     return this.refreshPromise;
   }
 
-  private begin(ids: number[], captureTemplates = true, eligibleJobs?: ReadonlySet<string>): void {
-    if (!this.data.settings.stagingConfirmed || !this.data.settings.authorizedDomains.length)
+  private invalidateSimpleReview(reason: string): void {
+    this.simpleGeneration++;
+    this.simpleStartAbort?.abort(new Error(reason));
+    if (this.preparedRun) this.preparedRun.status = 'finished';
+    const reviewed = new Set(this.preparedRun?.jobIds ?? []);
+    for (const job of this.data.jobs)
+      if (reviewed.has(job.id) && job.status === 'pending') {
+        job.status = 'cancelled';
+        job.finishedAt = Date.now();
+        job.error = reason;
+      }
+    if (this.simpleRun) {
+      this.simpleRun.revoked = true;
+      this.simpleRun.settings = {
+        ...this.simpleRun.settings,
+        stagingConfirmed: false,
+        authorizedDomains: [],
+      };
+    }
+  }
+
+  private finishSimpleRun(): void {
+    const run = this.simpleRun;
+    if (!run || run.starting || [...run.browserIds].some((id) => this.active.has(id))) return;
+    if (this.data.jobs.some((job) => run.jobIds.has(job.id) && ['pending', 'running'].includes(job.status)))
+      return;
+    // Every runQa promise has finished its native gated cleanup before reaching here.
+    if (this.preparedRun?.id === run.reviewId) this.preparedRun.status = 'finished';
+    this.simpleRun = undefined;
+    if (!this.active.size && !this.scheduleArmed) this.paused = false;
+    this.changed();
+  }
+
+  private async prepareSimple(command: Extract<AppCommand, { type: 'simple-distribute' }>): Promise<void> {
+    if (this.active.size || this.simpleRun || this.preparedRun?.status === 'running')
+      throw new Error('Stop the current batch before distributing new links.');
+    if (
+      this.manager
+        .snapshots()
+        .some((browser) =>
+          ['NAVIGATING', 'RUNNING', 'PAUSED', 'ASSIGNING_PROXY', 'RETRY_WAIT'].includes(browser.state),
+        )
+    )
+      throw new Error('Stop active browsers before distributing new links.');
+    const plan = prepareSimpleDistribution(command.text, command.count, this.data.settings.allowLocalhost);
+    const previous = new Set([...this.data.simpleJobIds, ...(this.preparedRun?.jobIds ?? [])]);
+    const retained = this.data.jobs.filter((job) => !(previous.has(job.id) && job.status === 'pending'));
+    const preserved = new Map(this.data.preservedJobs.map((job) => [job.id, job]));
+    for (const job of retained) if (job.status === 'pending') preserved.set(job.id, job);
+    if (preserved.size > 1000)
+      throw new Error(
+        'The preserved saved-work backlog is full. Export and review the older queue before adding more legacy work.',
+      );
+    if (retained.filter((job) => job.status === 'running').length + plan.jobs.length > 1000)
+      throw new Error('Queue limit is 1,000 active jobs; saved pending work has been preserved.');
+    const generation = ++this.simpleGeneration;
+    this.preparingSimple = true;
+    this.scheduleArmed = false;
+    try {
+      const openIds = this.manager.snapshots().map((browser) => browser.id);
+      const target = Math.max(command.count, ...openIds);
+      if (plan.browserIds.some((id) => !openIds.includes(id))) await this.manager.create(target);
+      if (generation !== this.simpleGeneration || this.closing)
+        throw new Error('Distribution was cancelled. Distribute again when ready.');
+      this.data.jobs = [
+        ...retained.filter((job) => !['pending', 'running'].includes(job.status)).slice(-500),
+        ...retained.filter((job) => job.status === 'running'),
+        ...plan.jobs,
+      ];
+      this.data.preservedJobs = [...preserved.values()];
+      this.data.simpleJobIds = plan.jobs.map((job) => job.id);
+      this.preparedAssignments = plan.jobs.map(({ id, browserId, url }) => ({ id, browserId, url }));
+      this.preparedRun = {
+        id: randomUUID(),
+        count: command.count,
+        device: command.device,
+        domains: [...plan.domains],
+        jobIds: plan.jobs.map((job) => job.id),
+        browserIds: [...plan.browserIds],
+        urls: [...plan.urls],
+        createdAt: Date.now(),
+        status: 'ready',
+      };
+    } finally {
+      this.preparingSimple = false;
+    }
+  }
+
+  private async startSimple(reviewId: string, confirmed: boolean): Promise<void> {
+    const review = this.preparedRun;
+    if (confirmed !== true || !review || review.id !== reviewId || review.status === 'finished')
+      throw new Error('Distribute the links and explicitly approve the current review before Start.');
+    if (review.status === 'running') {
+      await this.resumeSimple();
+      return;
+    }
+    if (this.active.size || this.simpleRun) throw new Error('Stop the current batch before Start.');
+    const open = new Set(this.manager.snapshots().map((browser) => browser.id));
+    if (
+      this.preparedAssignments.length !== review.jobIds.length ||
+      this.preparedAssignments.some((expected) => {
+        const job = this.data.jobs.find((candidate) => candidate.id === expected.id);
+        return (
+          !job ||
+          job.status !== 'pending' ||
+          job.browserId !== expected.browserId ||
+          job.url !== expected.url ||
+          !open.has(job.browserId)
+        );
+      })
+    )
+      throw new Error('The reviewed assignments changed. Distribute again before Start.');
+    const settings = simpleRunSettings(this.data.settings, review.domains, this.test?.settings?.timings);
+    if (this.performance.memoryMb > settings.resourceLimitMb)
+      throw new Error('The memory budget is exceeded. Stop other work before starting this batch.');
+    const generation = this.simpleGeneration;
+    const abort = new AbortController();
+    this.simpleStartAbort = abort;
+    const run: SimpleExecution = {
+      reviewId: review.id,
+      browserIds: new Set(review.browserIds),
+      jobIds: new Set(review.jobIds),
+      settings: { ...settings, stagingConfirmed: false, authorizedDomains: [] },
+      revoked: false,
+      starting: true,
+    };
+    this.simpleRun = run;
+    review.status = 'running';
+    this.scheduleArmed = false;
+    this.paused = false;
+    for (const id of review.browserIds) this.pausedIds.delete(id);
+    this.changed();
+    try {
+      await this.manager.applyDevice(review.browserIds, { ...DEVICES[review.device] }, abort.signal);
+      abort.signal.throwIfAborted();
+      if (generation !== this.simpleGeneration || this.simpleRun !== run || this.closing)
+        throw new Error('Start was cancelled. Distribute again when ready.');
+      this.data.settings.browserCount = review.count;
+      run.settings = settings;
+      run.starting = false;
+      const ready = review.browserIds.filter((id) => !this.pausedIds.has(id));
+      if (!this.paused && ready.length) this.begin(ready, false, run.jobIds, run.reviewId);
+    } catch (error) {
+      if (this.simpleRun === run) {
+        this.invalidateSimpleReview(error instanceof Error ? error.message : String(error));
+        await Promise.allSettled(review.browserIds.map((id) => this.manager.stop(id)));
+        run.starting = false;
+        this.finishSimpleRun();
+      }
+      throw error;
+    } finally {
+      if (this.simpleStartAbort === abort) this.simpleStartAbort = undefined;
+    }
+  }
+
+  private async resumeSimple(): Promise<void> {
+    const run = this.simpleRun;
+    if (!run || run.revoked) throw new Error('The reviewed batch is not ready to resume.');
+    const ids = [...run.browserIds];
+    if (run.starting) {
+      this.paused = false;
+      for (const id of ids) this.pausedIds.delete(id);
+      return;
+    }
+    if (!this.paused && !ids.some((id) => this.pausedIds.has(id))) return;
+    const generation = this.simpleGeneration;
+    this.paused = false;
+    for (const id of ids) this.pausedIds.delete(id);
+    await Promise.all(ids.map((id) => this.manager.resume(id)));
+    if (generation !== this.simpleGeneration || this.simpleRun !== run || run.revoked) return;
+    const pending = ids.filter(
+      (id) =>
+        !this.active.has(id) &&
+        this.data.jobs.some(
+          (job) => job.browserId === id && job.status === 'pending' && run.jobIds.has(job.id),
+        ),
+    );
+    if (pending.length) this.begin(pending, false, run.jobIds, run.reviewId);
+    this.finishSimpleRun();
+  }
+
+  private begin(
+    ids: number[],
+    captureTemplates = true,
+    eligibleJobs?: ReadonlySet<string>,
+    simpleReviewId?: string,
+  ): void {
+    const simple = simpleReviewId ? this.simpleRun : undefined;
+    if (
+      simpleReviewId &&
+      (!simple || simple.reviewId !== simpleReviewId || simple.revoked || simple.starting)
+    )
+      throw new Error('This batch no longer has permission to run.');
+    if (!simple && this.preparedRun && this.preparedRun.status !== 'finished')
+      throw new Error('Use Start on the reviewed batch to approve its exact website hosts.');
+    const settings = simple?.settings ?? this.data.settings;
+    if (!settings.stagingConfirmed || !settings.authorizedDomains.length)
       throw new Error(
         'Configure the authorized domains and confirm a staging or test-ad environment before QA.',
       );
-    if (this.performance.memoryMb > this.data.settings.resourceLimitMb)
+    if (this.performance.memoryMb > settings.resourceLimitMb)
       throw new Error(
         'The memory budget is exceeded. Close browsers or raise the configured budget before starting another job.',
       );
@@ -384,7 +605,7 @@ export class UnicornController {
     )
       throw new Error('Distribute URLs to create pending test jobs first.');
     this.paused = false;
-    this.scheduleArmed = this.data.settings.schedule.enabled;
+    this.scheduleArmed = !simple && this.data.settings.schedule.enabled;
     if (captureTemplates) {
       this.data.scheduleTemplates = [
         ...this.data.scheduleTemplates.filter((job) => !selected.has(job.browserId)),
@@ -408,6 +629,15 @@ export class UnicornController {
       this.stopped.delete(id);
       const operation = this.worker(id, eligible).finally(() => {
         this.active.delete(id);
+        const run = this.simpleRun;
+        if (run && this.stopped.has(id))
+          for (const job of this.data.jobs)
+            if (run.jobIds.has(job.id) && job.browserId === id && job.status === 'pending') {
+              job.status = 'cancelled';
+              job.finishedAt = Date.now();
+              job.error = 'The browser stopped; distribute again to review its remaining links.';
+            }
+        this.finishSimpleRun();
         this.persistSoon();
         this.changed();
         if (!this.active.size && this.scheduleArmed)
@@ -422,13 +652,14 @@ export class UnicornController {
       const job = this.data.jobs.find(
         (item) => item.browserId === id && item.status === 'pending' && eligibleJobs.has(item.id),
       );
-      if (!job || this.performance.memoryMb > this.data.settings.resourceLimitMb) break;
+      if (!job || this.performance.memoryMb > this.settingsFor(id).resourceLimitMb) break;
+      const simple = this.simpleRun?.jobIds.has(job.id) ? this.simpleRun : undefined;
       job.status = 'running';
       job.error = undefined;
       this.persistSoon();
       this.changed();
       try {
-        assertApproved(job.url, this.data.settings);
+        assertApproved(job.url, this.settingsFor(id));
         await this.manager.runQa(id, job.url);
         job.status = 'completed';
         job.finishedAt = Date.now();
@@ -443,26 +674,33 @@ export class UnicornController {
           job.status = 'failed';
           this.data.totals.failed++;
           this.pausedIds.add(id);
-          this.data.scheduleTemplates = this.data.scheduleTemplates.filter(
-            (template) => template.browserId !== id || template.url !== job.url,
-          );
+          if (!simple)
+            this.data.scheduleTemplates = this.data.scheduleTemplates.filter(
+              (template) => template.browserId !== id || template.url !== job.url,
+            );
           if (
             error instanceof SiteRestrictionError ||
             /HTTP (401|403|429)|challenge detected|rate.?limit|daily navigation limit/i.test(job.error)
           ) {
             const host =
               error instanceof SiteRestrictionError ? error.restrictedHost : new URL(job.url).hostname;
-            this.data.scheduleTemplates = this.data.scheduleTemplates.filter(
-              (template) => new URL(template.url).hostname !== host,
-            );
+            if (!simple)
+              this.data.scheduleTemplates = this.data.scheduleTemplates.filter(
+                (template) => new URL(template.url).hostname !== host,
+              );
             for (const pending of this.data.jobs)
-              if (pending.status === 'pending' && new URL(pending.url).hostname === host) {
+              if (
+                pending.status === 'pending' &&
+                (!simple || simple.jobIds.has(pending.id)) &&
+                new URL(pending.url).hostname === host
+              ) {
                 pending.status = 'cancelled';
                 pending.finishedAt = Date.now();
                 pending.error = 'Host requires manual review after an access restriction.';
               }
             for (const browser of this.manager.snapshots()) {
               if (browser.id === id || !this.active.has(browser.id)) continue;
+              if (simple && !simple.browserIds.has(browser.id)) continue;
               let currentHost: string;
               try {
                 currentHost = new URL(browser.url).hostname;
@@ -479,6 +717,14 @@ export class UnicornController {
             }
           }
         }
+        if (simple)
+          for (const pending of this.data.jobs)
+            if (simple.jobIds.has(pending.id) && pending.browserId === id && pending.status === 'pending') {
+              pending.status = 'cancelled';
+              pending.finishedAt = Date.now();
+              pending.error =
+                'The browser stopped after a failed job; distribute again to review the remaining links.';
+            }
         job.finishedAt = Date.now();
         this.logs.add('warn', 'job', job.error, id);
         break;
@@ -494,6 +740,26 @@ export class UnicornController {
           .length < Math.max(4, this.data.settings.browserCount))
     )
       void this.replenishProxies();
+    const simple = this.simpleRun;
+    if (simple) {
+      if (simple.revoked || simple.starting || this.performance.memoryMb > simple.settings.resourceLimitMb)
+        return;
+      const available = this.pool
+        .list()
+        .filter((proxy) => proxy.status === 'available' && proxy.assignedTo === undefined).length;
+      const pending = [...simple.browserIds].filter(
+        (id) =>
+          !this.active.has(id) &&
+          !this.pausedIds.has(id) &&
+          this.data.jobs.some(
+            (job) => job.browserId === id && job.status === 'pending' && simple.jobIds.has(job.id),
+          ),
+      );
+      if (available && pending.length)
+        this.begin(pending.slice(0, available), false, simple.jobIds, simple.reviewId);
+      this.finishSimpleRun();
+      return;
+    }
     if (!this.scheduleArmed || this.active.size || !this.data.nextRunAt || Date.now() < this.data.nextRunAt)
       return;
     const schedule = this.data.settings.schedule;
@@ -577,12 +843,56 @@ export class UnicornController {
   }
 
   async command(command: AppCommand): Promise<CommandResult> {
+    const simple = command.type === 'simple-distribute' || command.type === 'simple-start';
+    const passive =
+      [
+        'snapshot',
+        'refresh-proxies',
+        'diagnostic',
+        'export-logs',
+        'export-results',
+        'import-urls',
+        'open-release-page',
+        'popup',
+      ].includes(command.type) ||
+      (command.type === 'profile' && command.action === 'storage');
+    const control =
+      command.type === 'global' ||
+      (command.type === 'browser' && ['start', 'pause', 'resume', 'stop', 'close'].includes(command.action));
+    if (simple && (this.preparingSimple || this.workspaceMutations))
+      throw new Error('Wait for the current browser operation to finish before Distribute or Start.');
+    if (
+      !passive &&
+      !simple &&
+      !control &&
+      (this.preparingSimple || (this.simpleRun && !this.simpleRun.revoked))
+    )
+      throw new Error('Stop the reviewed batch before changing its workspace.');
+    if (!passive && !simple && !control && this.preparedRun?.status === 'ready')
+      this.invalidateSimpleReview('The workspace changed. Distribute again before Start.');
+    if (!passive) this.workspaceMutations++;
+    try {
+      return await this.executeCommand(command);
+    } finally {
+      if (!passive) this.workspaceMutations--;
+    }
+  }
+
+  private async executeCommand(command: AppCommand): Promise<CommandResult> {
     let message: string | undefined;
     let importedUrls: string[] | undefined;
     let storageBytes: number | undefined;
     let diagnostic: Record<string, unknown> | undefined;
     switch (command.type) {
       case 'snapshot':
+        break;
+      case 'simple-distribute':
+        await this.prepareSimple(command);
+        message = `${this.preparedRun!.jobIds.length} jobs distributed. Start approves only the listed website hosts for this batch.`;
+        break;
+      case 'simple-start':
+        await this.startSimple(command.reviewId, command.confirmed);
+        message = 'The reviewed batch is running once.';
         break;
       case 'create':
         this.cancelBrowserQueue(
@@ -600,26 +910,87 @@ export class UnicornController {
         await this.manager.navigate(command.id, command.url);
         break;
       case 'browser':
-        if (command.action === 'start') this.begin([command.id]);
-        else {
-          if (command.action === 'stop' || command.action === 'close')
-            this.cancelBrowserQueue([command.id], 'Browser stopped by user.');
+        if (command.action === 'start') {
+          if (this.simpleRun) await this.resumeSimple();
+          else this.begin([command.id]);
+        } else {
+          if (command.action === 'stop' || command.action === 'close') {
+            if (this.simpleRun?.starting) this.invalidateSimpleReview('Browser stopped during Start.');
+            if (this.simpleRun?.browserIds.has(command.id)) {
+              this.stopped.add(command.id);
+              this.pausedIds.add(command.id);
+              for (const job of this.data.jobs)
+                if (
+                  job.browserId === command.id &&
+                  this.simpleRun.jobIds.has(job.id) &&
+                  job.status === 'pending'
+                ) {
+                  job.status = 'cancelled';
+                  job.finishedAt = Date.now();
+                  job.error = 'Browser stopped by user.';
+                }
+            } else this.cancelBrowserQueue([command.id], 'Browser stopped by user.');
+          }
           if (command.action === 'pause') this.pausedIds.add(command.id);
+          if (
+            command.action === 'pause' &&
+            this.simpleRun?.starting &&
+            this.simpleRun.browserIds.has(command.id)
+          )
+            break;
+          if (command.action === 'resume' && this.simpleRun) {
+            await this.resumeSimple();
+            break;
+          }
           if (command.action === 'resume') this.pausedIds.delete(command.id);
           await this.manager.action(command.id, command.action);
           if (command.action === 'resume' && !this.active.has(command.id)) {
             const reviewed = this.reviewedPending([command.id]);
             if (reviewed.size) this.begin([command.id], false, reviewed);
           }
+          this.finishSimpleRun();
         }
         break;
       case 'global': {
         const ids = this.manager.snapshots().map((item) => item.id);
-        if (command.action === 'start') this.begin(ids);
-        else if (command.action === 'pause') {
+        if (command.action === 'start') {
+          if (this.simpleRun) await this.resumeSimple();
+          else this.begin(ids);
+        } else if (command.action === 'pause') {
+          const working = this.manager
+            .snapshots()
+            .filter(
+              (browser) =>
+                this.active.has(browser.id) ||
+                browser.loading ||
+                browser.proxy ||
+                [
+                  'WAITING_FOR_PROXY',
+                  'ASSIGNING_PROXY',
+                  'NAVIGATING',
+                  'RUNNING',
+                  'RETRY_WAIT',
+                  'PAUSED',
+                ].includes(browser.state),
+            );
+          if (!this.active.size && !this.scheduleArmed && !this.simpleRun && !working.length) {
+            this.paused = false;
+            break;
+          }
           this.paused = true;
-          await Promise.all(ids.map((id) => this.manager.pause(id)));
+          await Promise.all(
+            working
+              .map((browser) => browser.id)
+              .filter(
+                (id) => !this.simpleRun || (!this.simpleRun.starting && this.simpleRun.browserIds.has(id)),
+              )
+              .map((id) => this.manager.pause(id)),
+          );
         } else if (command.action === 'resume') {
+          if (this.simpleRun) {
+            await this.resumeSimple();
+            break;
+          }
           this.paused = false;
           for (const id of ids) this.pausedIds.delete(id);
           await Promise.all(ids.map((id) => this.manager.resume(id)));
@@ -627,15 +998,24 @@ export class UnicornController {
           const reviewed = this.reviewedPending(pendingIds);
           if (reviewed.size) this.begin(pendingIds, false, reviewed);
         } else {
+          const simpleMode =
+            !!this.preparedRun || this.preparingSimple || (!this.scheduleArmed && !this.active.size);
           this.scheduleCancellationGeneration++;
           this.scheduleArmed = false;
-          this.data.settings.schedule.enabled = false;
-          this.data.scheduleTemplates = [];
+          if (simpleMode) this.invalidateSimpleReview('Batch stopped by user.');
+          else {
+            this.data.settings.schedule.enabled = false;
+            this.data.scheduleTemplates = [];
+            this.data.nextRunAt = null;
+          }
           this.acceptedJobs.clear();
           this.paused = false;
-          this.data.nextRunAt = null;
           for (const id of ids) this.stopped.add(id);
-          await Promise.all(ids.map((id) => this.manager.stop(id)));
+          try {
+            await Promise.all(ids.map((id) => this.manager.stop(id)));
+          } finally {
+            this.finishSimpleRun();
+          }
         }
         break;
       }
@@ -798,6 +1178,7 @@ export class UnicornController {
                   exportedAt: new Date().toISOString(),
                   totals: this.data.totals,
                   jobs: this.data.jobs,
+                  preservedJobs: this.data.preservedJobs,
                   performance: this.performance,
                 };
           await writeFile(choice.filePath, JSON.stringify(value, null, 2));
@@ -816,6 +1197,16 @@ export class UnicornController {
 
   async shutdown(): Promise<void> {
     this.closing = true;
+    this.simpleGeneration++;
+    this.simpleStartAbort?.abort(new Error('Application is closing'));
+    if (this.simpleRun) {
+      this.simpleRun.revoked = true;
+      this.simpleRun.settings = {
+        ...this.simpleRun.settings,
+        stagingConfirmed: false,
+        authorizedDomains: [],
+      };
+    }
     this.scheduleArmed = false;
     clearInterval(this.pollTimer);
     clearTimeout(this.sendTimer);

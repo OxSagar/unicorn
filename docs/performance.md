@@ -18,7 +18,7 @@ GitHub-hosted Windows runners are a verification environment; their available CP
 
 ## Historical rc.1 short-run evidence
 
-The following measurements predate direct API assignment and the simpler rc.2 interface. Current release measurements and test counts are attached to that release's Actions run; these historical numbers are not rc.2 benchmark claims.
+The following measurements predate direct API assignment and the simpler rc.2/rc.3 interfaces. Current release measurements and test counts are attached to that release's Actions run; these historical numbers are not benchmarks of the current release.
 
 The [Windows verification record](verification.md) and [machine-readable evidence](evidence/windows-candidate.json) identify the exact source SHA, run, test results and hardware. The hosted runner exposed four logical CPUs and 16,379 MiB RAM on Windows Server 2025. Native tests passed concurrent navigation at 1, 5, 10, 15 and 20 profiles, plus creation/resizing/closure at every count from 1 through 20.
 

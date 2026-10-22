@@ -50,15 +50,15 @@ interface ProfileData {
 }
 export interface BrowserManagerOptions {
   window: BrowserWindow;
-  settings: () => AppSettings;
+  settings: (browserId?: number) => AppSettings;
   proxies: {
     acquire(id: number, signal?: AbortSignal): Promise<ProxyRecord | null | undefined>;
     release(id: number, reason?: string): void | Promise<void>;
   };
   log: (level: ActivityEvent['level'], category: string, message: string, browserId?: number) => void;
   changed: () => void;
-  navigationAllowed?: (url: string) => void;
-  requestAllowed?: (url: string) => void;
+  navigationAllowed?: (url: string, browserId?: number) => void;
+  requestAllowed?: (url: string, browserId?: number) => void;
   profileData?: { load(id: number): ProfileData; save(id: number, data: ProfileData): void };
   diagnosticsDir?: string;
   emergencyStop?: () => void;
@@ -85,6 +85,7 @@ interface Entry {
   healthAt: number;
   healthMisses: number;
   healthProbe?: { contents: WebContents; abort: AbortController };
+  deviceChanging?: boolean;
   synthetic: boolean;
   closing: boolean;
   downloads: Set<Electron.DownloadItem>;
@@ -165,10 +166,10 @@ export class BrowserManager {
     });
     const holder: { entry?: Entry } = {};
     const gate = new SessionGate(ses, {
-      approveRequest: (url) => this.options.requestAllowed?.(url),
+      approveRequest: (url) => this.options.requestAllowed?.(url, id),
       approveNavigation: (url, mainFrame) => {
-        assertApproved(url, this.options.settings());
-        if (mainFrame) this.options.navigationAllowed?.(url);
+        assertApproved(url, this.options.settings(id));
+        if (mainFrame) this.options.navigationAllowed?.(url, id);
       },
       onFailure: (message, mainFrame, webContentsId) => {
         const entry = holder.entry;
@@ -332,7 +333,7 @@ export class BrowserManager {
       try {
         if (!current()) throw new Error('The browser view was replaced');
         if (!entry.gate.isEnabled) throw new Error('Browser networking is paused');
-        assertApproved(url, this.options.settings());
+        assertApproved(url, this.options.settings(entry.snapshot.id));
       } catch (error) {
         event.preventDefault();
         this.log(entry, 'warn', 'navigation', String(error));
@@ -341,7 +342,7 @@ export class BrowserManager {
     contents.on('will-redirect', (event, url) => {
       try {
         if (!current()) throw new Error('The browser view was replaced');
-        assertApproved(url, this.options.settings());
+        assertApproved(url, this.options.settings(entry.snapshot.id));
       } catch (error) {
         event.preventDefault();
         this.log(entry, 'warn', 'navigation', `Redirect blocked: ${String(error)}`);
@@ -450,7 +451,7 @@ export class BrowserManager {
         if (!current()) throw new Error('The browser view was replaced');
         if (!entry.gate.isEnabled || entry.children.size >= 8)
           throw new Error('Popup limit reached or networking is inactive');
-        assertApproved(details.url, this.options.settings());
+        assertApproved(details.url, this.options.settings(entry.snapshot.id));
         this.log(entry, 'info', 'popup', 'Approved popup requested');
         return {
           action: 'allow',
@@ -493,7 +494,7 @@ export class BrowserManager {
                     httpReferrer: details.referrer,
                     postData: details.postBody?.data,
                   }),
-                  this.options.settings().timings.navigationTimeoutMs,
+                  this.options.settings(entry.snapshot.id).timings.navigationTimeoutMs,
                 ).catch((error: unknown) => this.log(entry, 'warn', 'popup', String(error)));
               });
             return childContents;
@@ -635,7 +636,7 @@ export class BrowserManager {
         child.setBounds({ x, y, width, height });
         child.setVisible(item.visible && entry.inspectedPopup === id);
       }
-      if (sizeChanged)
+      if (sizeChanged && !entry.deviceChanging)
         void fitDevice(entry.view.webContents, entry.snapshot.device, width, height).catch(() => undefined);
     }
   }
@@ -681,14 +682,14 @@ export class BrowserManager {
   }
 
   private async navigateReady(entry: Entry, url: string, control: RunControl): Promise<void> {
-    const normalized = assertApproved(url, this.options.settings());
+    const normalized = assertApproved(url, this.options.settings(entry.snapshot.id));
     await control.checkpoint();
     if (entry.restricted) throw entry.restricted;
     await this.ready(entry, control.signal, entry.synthetic, control);
     await control.checkpoint();
     this.move(entry, 'NAVIGATING');
     entry.snapshot.lastError = undefined;
-    const timeoutMs = this.options.settings().timings.navigationTimeoutMs;
+    const timeoutMs = this.options.settings(entry.snapshot.id).timings.navigationTimeoutMs;
     const contents = entry.view.webContents;
     try {
       await new Promise<void>((resolve, reject) => {
@@ -848,7 +849,7 @@ export class BrowserManager {
             if (entry.rendererFailure) throw entry.rendererFailure;
             if (synthetic) {
               this.move(entry, 'COMPLETED');
-              if (this.options.settings().closePopupsAfterRun) this.closePopups(entry);
+              if (this.options.settings(entry.snapshot.id).closePopupsAfterRun) this.closePopups(entry);
               await this.lockNetwork(entry);
             }
             break;
@@ -861,7 +862,7 @@ export class BrowserManager {
             if (!synthetic || abort.signal.aborted || entry.closing || entry.restricted) throw failure;
             const decision = this.recoveryBudgets
               .get(entry.snapshot.id)!
-              .reserve(failure, retries, this.options.settings().retryLimit);
+              .reserve(failure, retries, this.options.settings(entry.snapshot.id).retryLimit);
             if (!decision.allowed) {
               if (failure instanceof RendererCrashError)
                 this.log(
@@ -1009,7 +1010,7 @@ export class BrowserManager {
   }
 
   async navigate(id: number, url: string): Promise<void> {
-    const normalized = assertApproved(url, this.options.settings());
+    const normalized = assertApproved(url, this.options.settings(id));
     const entry = this.entry(id);
     return this.operation(entry, false, async (control) => {
       entry.snapshot.stage = 'Manual browsing';
@@ -1018,12 +1019,12 @@ export class BrowserManager {
   }
 
   async runQa(id: number, url: string): Promise<void> {
-    const normalized = assertApproved(url, this.options.settings());
+    const normalized = assertApproved(url, this.options.settings(id));
     const entry = this.entry(id);
     return this.operation(entry, true, async (control) => {
       await runStages(normalized, {
         contents: entry.view.webContents,
-        settings: this.options.settings,
+        settings: () => this.options.settings(id),
         control,
         navigate: async (destination) => {
           for (let attempt = 0; ; attempt++) {
@@ -1036,7 +1037,7 @@ export class BrowserManager {
                 control.signal.aborted ||
                 entry.restricted ||
                 !isRetryableTransportError(error) ||
-                attempt >= this.options.settings().retryLimit
+                attempt >= this.options.settings(id).retryLimit
               )
                 throw error;
               await this.lockNetwork(entry, message);
@@ -1150,17 +1151,22 @@ export class BrowserManager {
     const index = history.getActiveIndex() + (action === 'back' ? -1 : 1);
     const target = history.getEntryAtIndex(index);
     if (!target) return;
-    assertApproved(target.url, this.options.settings());
+    assertApproved(target.url, this.options.settings(id));
     if (entry.active) throw new Error('Pause or stop the active QA run before changing browser history');
     const controller = new AbortController();
     await this.ready(entry, controller.signal, false);
     history.goToIndex(index);
   }
 
-  async applyDevice(ids: number[], device: DeviceConfig): Promise<void> {
+  async applyDevice(ids: number[], device: DeviceConfig, signal?: AbortSignal): Promise<void> {
     for (const id of ids) {
+      signal?.throwIfAborted();
       const entry = this.entry(id);
       if (entry.active) throw new Error('Stop active testing before changing its device configuration');
+      if (signal) {
+        await this.applyReviewedDevice(entry, device, signal);
+        continue;
+      }
       const scale = entry.bounds
         ? Math.min(1, entry.bounds.width / device.width, entry.bounds.height / device.height)
         : 1;
@@ -1176,6 +1182,69 @@ export class BrowserManager {
       );
     }
     this.changed();
+  }
+
+  private async applyReviewedDevice(entry: Entry, device: DeviceConfig, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    const run = this.operation(entry, false, async (control) => {
+      const activeSignal = AbortSignal.any([signal, control.signal]);
+      activeSignal.throwIfAborted();
+      const view = entry.view;
+      entry.deviceChanging = true;
+      const ensureCurrent = () => {
+        activeSignal.throwIfAborted();
+        if (entry.closing || entry.view !== view || view.webContents.isDestroyed())
+          throw new Error('Browser changed while applying its device configuration');
+      };
+      try {
+        const scale = entry.bounds
+          ? Math.min(1, entry.bounds.width / device.width, entry.bounds.height / device.height)
+          : 1;
+        await withDeadline(applyDevice(view.webContents, device, scale), 10_000, activeSignal);
+        ensureCurrent();
+        for (const popup of entry.children.values()) {
+          await withDeadline(applyDevice(popup.webContents, device, scale), 10_000, activeSignal);
+          ensureCurrent();
+        }
+        // Layout may have moved while CDP was applying the preset. Fit the new
+        // metrics once, after suppressing concurrent fits using the old preset.
+        if (entry.bounds) {
+          await withDeadline(
+            fitDevice(view.webContents, device, entry.bounds.width, entry.bounds.height),
+            8000,
+            activeSignal,
+          );
+          ensureCurrent();
+        }
+        entry.snapshot.device = { ...device };
+        this.save(entry);
+        this.log(
+          entry,
+          'info',
+          'device',
+          `${device.preset} device applied (${device.width} × ${device.height})`,
+        );
+      } catch (error) {
+        // CDP work is not abortable. Closing this exact target prevents any late
+        // completion from changing a replacement view or a newer Start intent.
+        view.setVisible(false);
+        if (!view.webContents.isDestroyed()) view.webContents.close({ waitForBeforeUnload: false });
+        this.closePopups(entry);
+        throw error;
+      } finally {
+        entry.deviceChanging = false;
+      }
+    });
+    const operationAbort = entry.abort!;
+    const cancel = () => operationAbort.abort(signal.reason ?? new Error('Device change cancelled'));
+    signal.addEventListener('abort', cancel, { once: true });
+    if (signal.aborted) cancel();
+    try {
+      await run;
+      signal.throwIfAborted();
+    } finally {
+      signal.removeEventListener('abort', cancel);
+    }
   }
 
   async profile(id: number, action: ProfileAction): Promise<number | undefined> {
@@ -1303,7 +1372,7 @@ export class BrowserManager {
     const names = (await readdir(directory))
       .filter((item) => /^(\d+)-browser-\d+-.+\.(png|json)$/.test(item))
       .sort();
-    const cutoff = Date.now() - this.options.settings().logRetentionDays * 86400000;
+    const cutoff = Date.now() - this.options.settings(entry.snapshot.id).logRetentionDays * 86400000;
     for (let index = 0; index < names.length; index++) {
       if (index < names.length - 400 || Number(names[index].split('-')[0]) < cutoff)
         await unlink(path.join(directory, names[index])).catch(() => undefined);
