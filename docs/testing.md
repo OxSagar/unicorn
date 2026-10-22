@@ -57,6 +57,14 @@ Only `fixture.cer` is trusted. **Never import `untrusted.pem` or a certificate d
 
 The suite exercises JavaScript, Fetch, cookies, local storage, IndexedDB, cache, service workers, profile separation/restart, mobile/tablet emulation, controlled popups, QA navigation stages, 1/5/10/15/20 live sessions, every selectable count, API-country assignment without diagnostics, Austria, timeouts, empty pool, dropped proxies, certificate rejection, forbidden destinations, HTTP 403/429, cancellation, pause/resume, and renderer recovery. UI tests use the shipped single-screen workflow and native view bounds. They cover browser-count and device choices, non-running distribution, exact prepared batches, input changes, Start/Stop, temporary host approval, saved-state preservation and parent-scroll/expanded-view clipping. Production defaults are checked in unit tests; short native fixture timings are available only through the existing unpackaged E2E configuration. Proxy tests distinguish schema/country filtering from removed network preflight and verify zero diagnostic requests.
 
+### Diagnosing native networking failures
+
+The browser, profile, and minimal-UI suites collect bounded failure evidence before closing the application: the controller snapshot, job errors, browser stages and logs, current proxy routes, fixture requests, and proxy socket events. Their diagnostic harness also captures a bounded Chromium network log for controlled fixture traffic. Successful tests do not attach this failure bundle.
+
+Errors from unsettled native session-configuration operations identify the operation, phase, generation, and elapsed time. The existing eight-second deadline and permanently blocked state after an unsettled native mutation remain in force. Diagnostics do not add proxy preflight requests, automatic acceptance retries, relaxed assertions, or a direct-network fallback.
+
+Inspect the job error and operation phase before attributing a failure to application logic, a fixture, or the runner. A route observed after failure may already be the deliberate blocked route; compare it with the earlier assignment log. Preserve failed attempts alongside later successful runs. A successful rerun alone does not establish or fix an earlier failure's cause.
+
 ## CI and publishing
 
 `.github/workflows/ci.yml` runs source checks on Ubuntu and real Chromium/package verification on `windows-2025`. Reports are uploaded even on failure. On Windows it builds the installer and portable ZIP, extracts the actual ZIP and launches its executable, silently installs the NSIS package into the temporary runner, launches that installed copy, and computes checksums. The report records exact versions, sandbox/context isolation, package sizes, SHA-256 values and installer Authenticode status. Test certificates are removed in an unconditional cleanup step.

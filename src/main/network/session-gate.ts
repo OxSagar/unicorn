@@ -30,6 +30,13 @@ interface GateSessionState {
   poisoned?: Error;
 }
 
+type NativeMutationPhase =
+  | 'block.setProxy'
+  | 'block.closeAllConnections'
+  | 'assign.closeAllConnections'
+  | 'assign.setProxy'
+  | 'assign.forceReloadProxyConfig';
+
 // Electron keeps persistent Session objects when views close. A late native proxy
 // mutation must never regain a usable request gate, even after the view is reopened.
 const sessionStates = new WeakMap<Session, GateSessionState>();
@@ -129,8 +136,14 @@ export class SessionGate {
     if (this.state.poisoned) throw this.state.poisoned;
   }
 
-  private async mutation<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  private async mutation<T>(
+    phase: NativeMutationPhase,
+    generation: number,
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     signal?.throwIfAborted();
+    const startedAt = performance.now();
     let settled = false;
     const work = operation().then(
       (result) => {
@@ -146,11 +159,13 @@ export class SessionGate {
       return await withDeadline(work, 8000, signal);
     } catch (error) {
       if (!settled) {
+        const elapsedMs = Math.max(0, Math.round(performance.now() - startedAt));
+        const currentGeneration = this.state.generation;
         this.enabled = false;
         this.headersEnabled = false;
         this.state.generation++;
         this.state.poisoned ??= new Error(
-          `Session network configuration did not settle; restart Unicorn before reusing this browser profile: ${error instanceof Error ? error.message : String(error)}`,
+          `Session network configuration did not settle; restart Unicorn before reusing this browser profile: ${phase} (elapsed ${elapsedMs} ms; generation ${generation}; current generation ${currentGeneration}): ${error instanceof Error ? error.message : String(error)}`,
           { cause: error },
         );
         throw this.state.poisoned;
@@ -160,7 +175,7 @@ export class SessionGate {
   }
 
   async block(): Promise<void> {
-    this.state.generation++;
+    const generation = ++this.state.generation;
     this.enabled = false;
     this.headersEnabled = false;
     this.mainFrameGenerations.clear();
@@ -168,7 +183,7 @@ export class SessionGate {
       let failure = this.state.poisoned;
       if (!failure) {
         try {
-          await this.mutation(() =>
+          await this.mutation('block.setProxy', generation, () =>
             this.session.setProxy({
               mode: 'fixed_servers',
               proxyRules: BLOCKED_PROXY,
@@ -182,7 +197,9 @@ export class SessionGate {
       // Closing sockets is still safe after a poisoned setProxy, because assignment
       // is permanently disabled for this Session and no new route can be enabled.
       try {
-        await this.mutation(() => this.session.closeAllConnections());
+        await this.mutation('block.closeAllConnections', generation, () =>
+          this.session.closeAllConnections(),
+        );
       } catch (error) {
         failure ??= error instanceof Error ? error : new Error(String(error));
       }
@@ -199,8 +216,15 @@ export class SessionGate {
     await this.serial(async () => {
       this.assertUsable();
       signal.throwIfAborted();
-      await this.mutation(() => this.session.closeAllConnections(), signal);
       await this.mutation(
+        'assign.closeAllConnections',
+        generation,
+        () => this.session.closeAllConnections(),
+        signal,
+      );
+      await this.mutation(
+        'assign.setProxy',
+        generation,
         () =>
           this.session.setProxy({
             mode: 'fixed_servers',
@@ -212,7 +236,12 @@ export class SessionGate {
       // setProxy updates preferences before Chromium's network service necessarily
       // observes them. Reload its configuration, then independently require the
       // exact reserved route; reload alone does not prove which config was applied.
-      await this.mutation(() => this.session.forceReloadProxyConfig(), signal);
+      await this.mutation(
+        'assign.forceReloadProxyConfig',
+        generation,
+        () => this.session.forceReloadProxyConfig(),
+        signal,
+      );
       signal.throwIfAborted();
       resolution = (
         await withDeadline(this.session.resolveProxy('https://unicorn.invalid/'), 8000, signal)

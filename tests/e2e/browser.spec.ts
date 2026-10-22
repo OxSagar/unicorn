@@ -1,7 +1,15 @@
 import { test, expect } from '@playwright/test';
 import os from 'node:os';
 import { createFixtures, type BrowserFixtures } from '../fixtures/servers';
-import { launchUnicorn, closeHarness, invoke, snapshot, browserEvaluate, type Harness } from './helpers';
+import {
+  attachFailureDiagnostics,
+  launchUnicornWithDiagnostics as launchUnicorn,
+  closeHarness,
+  invoke,
+  snapshot,
+  browserEvaluate,
+  type Harness,
+} from './helpers';
 import { DEFAULT_SETTINGS, DEVICES } from '../../src/shared/defaults';
 import type { AppSnapshot } from '../../src/shared/types';
 import { withDeadline } from '../../src/main/browser/deadline';
@@ -17,6 +25,8 @@ test.afterAll(async () => {
 });
 test.afterEach(async ({}, testInfo) => {
   try {
+    if (testInfo.status !== testInfo.expectedStatus)
+      await attachFailureDiagnostics(harness, fixtures, testInfo);
     if (harness && concurrencyStartedAt && testInfo.status !== testInfo.expectedStatus) {
       const runtime = await withDeadline(
         harness.app.evaluate(async () => {

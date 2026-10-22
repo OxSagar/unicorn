@@ -1,6 +1,14 @@
 import { expect, test } from '@playwright/test';
 import { createFixtures, type BrowserFixtures } from '../fixtures/servers';
-import { browserEvaluate, closeHarness, invoke, launchUnicorn, snapshot, type Harness } from './helpers';
+import {
+  attachFailureDiagnostics,
+  browserEvaluate,
+  closeHarness,
+  invoke,
+  launchUnicornWithDiagnostics as launchUnicorn,
+  snapshot,
+  type Harness,
+} from './helpers';
 import { DEFAULT_SETTINGS, DEVICES } from '../../src/shared/defaults';
 import type {
   AppCommand,
@@ -30,15 +38,20 @@ test.beforeAll(async () => {
     expect(fixtures.httpsOrigin, 'Windows UI acceptance requires the trusted HTTPS fixture').toBeTruthy();
   origin = fixtures.httpsOrigin ?? fixtures.httpOrigin;
 });
-test.afterEach(async () => {
-  if (harness)
-    await harness.app
-      .evaluate(() => {
-        (globalThis as unknown as { __unicornTest: UiRuntime }).__unicornTest.releaseUiCommand?.();
-      })
-      .catch(() => undefined);
-  await closeHarness(harness);
-  harness = undefined;
+test.afterEach(async ({}, testInfo) => {
+  try {
+    if (testInfo.status !== testInfo.expectedStatus)
+      await attachFailureDiagnostics(harness, fixtures, testInfo);
+  } finally {
+    if (harness)
+      await harness.app
+        .evaluate(() => {
+          (globalThis as unknown as { __unicornTest: UiRuntime }).__unicornTest.releaseUiCommand?.();
+        })
+        .catch(() => undefined);
+    await closeHarness(harness);
+    harness = undefined;
+  }
 });
 test.afterAll(async () => {
   await fixtures.close();

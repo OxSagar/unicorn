@@ -1,12 +1,28 @@
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
+import type { Duplex } from 'node:stream';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ProxyRecord } from '../../src/shared/types';
 
 type Server = http.Server | https.Server;
+export interface FixtureProxyEvent {
+  at: number;
+  event: string;
+  socketId?: number;
+  side?: 'client' | 'upstream';
+  localPort?: number;
+  remotePort?: number;
+  target?: string;
+  method?: string;
+  statusCode?: number;
+  elapsedMs?: number;
+  code?: string;
+  syscall?: string;
+  hadError?: boolean;
+}
 export interface FixtureProxy {
   record: ProxyRecord;
   stop(): Promise<void>;
@@ -15,6 +31,12 @@ export interface FixtureProxy {
   requests: number;
   tunnels: number;
   traffic: Array<{ kind: 'request' | 'connect'; target: string; at: number }>;
+  diagnostics?(): {
+    listening: boolean;
+    activeSockets: number;
+    droppedEvents: number;
+    events: FixtureProxyEvent[];
+  };
 }
 export interface BrowserFixtures {
   httpOrigin: string;
@@ -59,13 +81,24 @@ export async function createFixtures(
     throw new Error('A TLS certificate is required for an HTTPS proxy fixture');
   const createProxyServer = (handler: http.RequestListener): Server =>
     options.secureProxy ? https.createServer(tls!, handler) : http.createServer(handler);
-  const track = (server: Server) => {
+  const track = (
+    server: Server,
+    observeClientError?: (error: NodeJS.ErrnoException, socket: Duplex) => void,
+  ) => {
     servers.push(server);
     server.on('connection', (socket) => {
       sockets.add(socket);
       socket.on('close', () => sockets.delete(socket));
     });
-    server.on('clientError', (_error, socket) => socket.destroy());
+    server.on('clientError', (error, socket) => {
+      // Preserve the fixture's original parser-error closure before observing it.
+      socket.destroy();
+      try {
+        observeClientError?.(error, socket);
+      } catch {
+        // Diagnostic capture must not change parser-error handling.
+      }
+    });
     return server;
   };
   const handler: http.RequestListener = (request, response) => {
@@ -229,6 +262,67 @@ export async function createFixtures(
     let failed = false;
     let stalled = false;
     const ownSockets = new Set<net.Socket>();
+    const diagnosticSockets = new Set<net.Socket>();
+    const socketIds = new WeakMap<Duplex, number>();
+    const events: FixtureProxyEvent[] = [];
+    let nextSocketId = 0;
+    let droppedEvents = 0;
+    const recordEvent = (event: string, details: Omit<FixtureProxyEvent, 'at' | 'event'> = {}) => {
+      if (events.length === 256) {
+        events.shift();
+        droppedEvents++;
+      }
+      events.push({ at: Date.now(), event, ...details });
+    };
+    const socketDetails = (socket: Duplex, side: 'client' | 'upstream') => ({
+      socketId: socketIds.get(socket),
+      side,
+      localPort: socket instanceof net.Socket ? socket.localPort : undefined,
+      remotePort: socket instanceof net.Socket ? socket.remotePort : undefined,
+    });
+    const errorDetails = (error: NodeJS.ErrnoException) => ({
+      code: typeof error.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(error.code) ? error.code : undefined,
+      syscall:
+        typeof error.syscall === 'string' && /^[a-zA-Z0-9_]{1,64}$/.test(error.syscall)
+          ? error.syscall
+          : undefined,
+    });
+    const elapsed = (startedAt: number) => Math.max(0, Math.round(performance.now() - startedAt));
+    const observeSocket = (socket: net.Socket, side: 'client' | 'upstream') => {
+      if (socketIds.has(socket)) return;
+      socketIds.set(socket, ++nextSocketId);
+      diagnosticSockets.add(socket);
+      const startedAt = performance.now();
+      recordEvent(side === 'client' ? 'tcp-accept' : 'upstream-socket', socketDetails(socket, side));
+      if (side === 'upstream')
+        socket.once('connect', () =>
+          recordEvent('upstream-connect', { ...socketDetails(socket, side), elapsedMs: elapsed(startedAt) }),
+        );
+      socket.on('error', (error: NodeJS.ErrnoException) =>
+        recordEvent(side === 'client' ? 'socket-error' : 'upstream-error', {
+          ...socketDetails(socket, side),
+          ...errorDetails(error),
+          elapsedMs: elapsed(startedAt),
+        }),
+      );
+      socket.once('close', (hadError) => {
+        diagnosticSockets.delete(socket);
+        recordEvent(side === 'client' ? 'tcp-close' : 'upstream-close', {
+          ...socketDetails(socket, side),
+          elapsedMs: elapsed(startedAt),
+          hadError,
+        });
+      });
+    };
+    const targetOrigin = (value: string | undefined, connect = false): string | undefined => {
+      try {
+        const target = new URL(connect ? `http://${value}` : (value ?? ''));
+        // Origins omit credentials, paths and query strings from diagnostic records.
+        return ['http:', 'https:'].includes(target.protocol) ? target.origin.slice(0, 256) : undefined;
+      } catch {
+        return undefined;
+      }
+    };
     const record: ProxyRecord = {
       id: '',
       ip: '127.0.0.1',
@@ -245,6 +339,12 @@ export async function createFixtures(
       requests: 0,
       tunnels: 0,
       traffic: [],
+      diagnostics: () => ({
+        listening: listener.listening,
+        activeSockets: diagnosticSockets.size,
+        droppedEvents,
+        events: events.map((event) => ({ ...event })),
+      }),
       fail() {
         failed = true;
         for (const socket of ownSockets) socket.destroy();
@@ -259,6 +359,20 @@ export async function createFixtures(
     };
     const listener = track(
       createProxyServer((request, response) => {
+        const startedAt = performance.now();
+        const details = {
+          ...socketDetails(request.socket, 'client'),
+          target: targetOrigin(request.url),
+          method: request.method?.slice(0, 16),
+        };
+        recordEvent('request', details);
+        response.once('finish', () =>
+          recordEvent('response', {
+            ...details,
+            statusCode: response.statusCode,
+            elapsedMs: elapsed(startedAt),
+          }),
+        );
         proxy.traffic.push({ kind: 'request', target: request.url ?? '', at: Date.now() });
         if (failed) {
           request.socket.destroy();
@@ -286,22 +400,42 @@ export async function createFixtures(
             headers: { ...request.headers, 'x-unicorn-fixture-proxy': String(index), connection: 'close' },
           },
           (incoming) => {
+            recordEvent('upstream-response', {
+              ...socketDetails(incoming.socket, 'upstream'),
+              target: details.target,
+              statusCode: incoming.statusCode,
+              elapsedMs: elapsed(startedAt),
+            });
             response.writeHead(incoming.statusCode ?? 502, incoming.headers);
             incoming.pipe(response);
           },
         );
-        outgoing.on('error', () => {
+        outgoing.on('socket', (socket) => observeSocket(socket, 'upstream'));
+        outgoing.on('error', (error: NodeJS.ErrnoException) => {
+          recordEvent('upstream-request-error', {
+            target: details.target,
+            ...errorDetails(error),
+            elapsedMs: elapsed(startedAt),
+          });
           if (!response.headersSent) response.writeHead(502);
           response.end();
         });
         request.pipe(outgoing);
       }),
+      (error, socket) =>
+        recordEvent('client-error', { ...socketDetails(socket, 'client'), ...errorDetails(error) }),
     );
     listener.on('connection', (socket) => {
+      observeSocket(socket, 'client');
       ownSockets.add(socket);
       socket.on('close', () => ownSockets.delete(socket));
     });
     listener.on('connect', (request, client, head) => {
+      recordEvent('connect-request', {
+        ...socketDetails(client, 'client'),
+        target: targetOrigin(request.url, true),
+        method: 'CONNECT',
+      });
       proxy.traffic.push({ kind: 'connect', target: request.url ?? '', at: Date.now() });
       if (failed) {
         client.destroy();
@@ -330,6 +464,7 @@ export async function createFixtures(
         client.pipe(upstream);
         upstream.pipe(client);
       });
+      observeSocket(upstream, 'upstream');
       sockets.add(upstream);
       ownSockets.add(upstream);
       upstream.on('error', () => client.destroy());
@@ -345,6 +480,7 @@ export async function createFixtures(
     const port = await listen(listener);
     record.port = port;
     record.id = `${record.protocol}://127.0.0.1:${port}`;
+    recordEvent('listen', { localPort: port });
     proxies.push(proxy);
   }
   return {
