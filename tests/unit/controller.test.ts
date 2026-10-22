@@ -1,0 +1,589 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BrowserWindow } from 'electron';
+import { UnicornController } from '../../src/main/controller';
+import { BrowserManager } from '../../src/main/browser/manager';
+import { ActivityLog, initialData, LocalStore, type StoredData } from '../../src/main/storage';
+import { DEVICES } from '../../src/shared/defaults';
+import type { AppCommand, BrowserSnapshot, TestJob } from '../../src/shared/types';
+import { SiteRestrictionError } from '../../src/main/network/site-restriction';
+
+vi.mock('electron', () => ({
+  app: {
+    getVersion: () => 'controller-test',
+    getAppMetrics: () => [],
+    setLoginItemSettings: vi.fn(),
+  },
+  dialog: { showOpenDialog: vi.fn(), showSaveDialog: vi.fn() },
+  shell: { openExternal: vi.fn() },
+}));
+vi.mock('../../src/main/browser/manager', () => ({ BrowserManager: vi.fn() }));
+
+const INTERVAL = 60_000;
+const FIRST = 'https://authorized.test/first';
+const SECOND = 'https://authorized.test/second';
+const OTHER = 'https://other.test/page';
+
+function deferred() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+/** Only the native browser boundary is simulated; the queue, clock, scope, and controller are real. */
+class BrowserDouble {
+  private browsers = new Map<number, BrowserSnapshot>();
+  private holds = new Map<string, ReturnType<typeof deferred>>();
+  private inFlight = new Map<number, ReturnType<typeof deferred>>();
+  readonly failures = new Map<string, Error>();
+
+  private browser(id: number): BrowserSnapshot {
+    const browser = this.browsers.get(id);
+    if (!browser) throw new Error(`Browser ${id} is not open`);
+    return browser;
+  }
+
+  hold(url: string) {
+    const completion = deferred();
+    this.holds.set(url, completion);
+    return completion;
+  }
+
+  readonly create = vi.fn(async (count: number) => {
+    for (const id of this.browsers.keys())
+      if (id > count) {
+        await this.stop(id);
+        this.browsers.delete(id);
+      }
+    for (let id = 1; id <= count; id++)
+      if (!this.browsers.has(id))
+        this.browsers.set(id, {
+          id,
+          name: `Browser ${id}`,
+          state: 'CREATED',
+          url: '',
+          title: 'Ready',
+          device: { ...DEVICES.desktop },
+          loading: false,
+          canGoBack: false,
+          canGoForward: false,
+          stage: 'Idle',
+          elapsedMs: 0,
+          jsErrors: 0,
+          networkErrors: 0,
+          history: [],
+          popups: [],
+        });
+  });
+
+  readonly snapshots = vi.fn(() => structuredClone([...this.browsers.values()]));
+  readonly checkHealth = vi.fn();
+
+  readonly runQa = vi.fn(async (id: number, url: string) => {
+    const browser = this.browser(id);
+    browser.url = url;
+    browser.state = 'RUNNING';
+    try {
+      const error = this.failures.get(url);
+      if (error) throw error;
+      const hold = this.holds.get(url);
+      if (hold) {
+        this.holds.delete(url);
+        this.inFlight.set(id, hold);
+        await hold.promise;
+      }
+      browser.state = 'COMPLETED';
+    } catch (error) {
+      browser.state = 'ERROR';
+      throw error;
+    } finally {
+      this.inFlight.delete(id);
+    }
+  });
+
+  readonly pause = vi.fn(async (id: number) => {
+    this.browser(id).state = 'PAUSED';
+  });
+
+  readonly resume = vi.fn(async (id: number) => {
+    this.browser(id).state = this.inFlight.has(id) ? 'RUNNING' : 'READY';
+  });
+
+  readonly stop = vi.fn(async (id: number) => {
+    this.inFlight.get(id)?.reject(new Error('Stopped by user'));
+    this.browser(id).state = 'STOPPED';
+  });
+
+  readonly action = vi.fn(async (id: number, action: string) => {
+    if (action === 'pause') await this.pause(id);
+    else if (action === 'resume') await this.resume(id);
+    else if (action === 'stop' || action === 'close') {
+      await this.stop(id);
+      if (action === 'close') this.browsers.delete(id);
+    } else throw new Error(`Unexpected browser action in controller test: ${action}`);
+  });
+
+  readonly shutdown = vi.fn(async () => {
+    await Promise.all([...this.browsers.keys()].map((id) => this.stop(id)));
+    this.browsers.clear();
+  });
+}
+
+const controllers = new Set<UnicornController>();
+
+function state(browserCount = 2): StoredData {
+  const data = initialData();
+  data.settings.browserCount = browserCount;
+  data.settings.authorizedDomains = ['authorized.test', 'other.test'];
+  data.settings.stagingConfirmed = true;
+  data.settings.schedule = {
+    enabled: true,
+    intervalMinutes: 1,
+    startHour: 0,
+    endHour: 24,
+    resumeAfterRestart: false,
+  };
+  return data;
+}
+
+function historicalJob(id: string, browserId: number, url: string): TestJob {
+  return {
+    id,
+    browserId,
+    url,
+    status: 'completed',
+    createdAt: Date.now() - 120_000,
+    finishedAt: Date.now() - 60_000,
+  };
+}
+
+async function setup(data = state()) {
+  const manager = new BrowserDouble();
+  vi.mocked(BrowserManager).mockImplementation(function () {
+    return manager as unknown as BrowserManager;
+  });
+  const window = {
+    isDestroyed: () => false,
+    webContents: { send: vi.fn() },
+  } as unknown as BrowserWindow;
+  let saved = structuredClone(data);
+  const store = new LocalStore('/unused-controller-test');
+  vi.spyOn(store, 'save').mockImplementation(async (value) => {
+    saved = structuredClone(value);
+  });
+  const logs = new ActivityLog('/unused-controller-test');
+  vi.spyOn(logs, 'add').mockImplementation(() => undefined);
+  vi.spyOn(logs, 'flush').mockResolvedValue();
+  const controller = new UnicornController(window, data, store, logs, {
+    userData: store.directory,
+    proxies: [],
+    diagnosticUrl: 'https://authorized.test/diagnostic',
+  });
+  controllers.add(controller);
+  await controller.initialize();
+  return {
+    controller,
+    manager,
+    store,
+    logs,
+    saved: () => structuredClone(saved),
+    urls: () => manager.runQa.mock.calls.map(([, url]) => url),
+    assign: async (id: number, urls: string[]) =>
+      controller.command({ type: 'distribute', ids: [id], urls, mode: 'round-robin' }),
+    close: async () => {
+      await controller.shutdown();
+      controllers.delete(controller);
+    },
+  };
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-10-22T12:00:00Z'));
+});
+
+afterEach(async () => {
+  for (const controller of controllers) await controller.shutdown();
+  controllers.clear();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe('explicit queue runs and recurrence', () => {
+  it('preserves state and flushes logs when native shutdown reports a cleanup error', async () => {
+    const { controller, manager, store, logs, assign } = await setup();
+    await assign(1, [FIRST]);
+    manager.shutdown.mockRejectedValueOnce(new Error('Native cookies flush timed out'));
+    await expect(controller.shutdown()).rejects.toThrow(/cleanup errors/);
+    expect(store.save).toHaveBeenCalled();
+    expect(logs.flush).toHaveBeenCalled();
+    expect(vi.mocked(store.save).mock.calls.at(-1)?.[0].jobs[0]?.url).toBe(FIRST);
+  });
+  it('editing a reviewed pending assignment requires a new Start and updates its browser safely', async () => {
+    const { controller, manager, assign, urls } = await setup();
+    const held = manager.hold(FIRST);
+    await assign(1, [FIRST, SECOND]);
+    await controller.command({ type: 'browser', id: 1, action: 'start' });
+    const pending = controller.snapshot().jobs.find((job) => job.url === SECOND)!;
+    await controller.command({ type: 'edit-job', id: pending.id, url: OTHER, browserId: 2 });
+    held.resolve();
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+    const edited = controller.snapshot().jobs.find((job) => job.url === OTHER)!;
+    expect(edited).toMatchObject({ browserId: 2, status: 'pending' });
+    expect(edited.id).not.toBe(pending.id);
+    expect(urls()).toEqual([FIRST, FIRST]);
+    await controller.command({ type: 'browser', id: 2, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(urls()).toEqual([FIRST, FIRST, OTHER]);
+    await expect(
+      controller.command({ type: 'edit-job', id: edited.id, url: FIRST, browserId: 1 }),
+    ).rejects.toThrow(/pending/);
+  });
+
+  it('rejects unsafe, duplicate or closed-browser queue edits without changing the original job', async () => {
+    const { controller, assign } = await setup();
+    await assign(1, [FIRST, SECOND]);
+    const original = controller.snapshot().jobs[0]!;
+    await expect(
+      controller.command({ type: 'edit-job', id: original.id, url: 'https://outside.test/', browserId: 1 }),
+    ).rejects.toThrow(/scope/);
+    await expect(
+      controller.command({ type: 'edit-job', id: original.id, url: SECOND, browserId: 1 }),
+    ).rejects.toThrow(/already/);
+    await expect(
+      controller.command({ type: 'edit-job', id: original.id, url: OTHER, browserId: 3 }),
+    ).rejects.toThrow(/Reopen/);
+    expect(controller.snapshot().jobs[0]).toEqual(original);
+  });
+
+  it('counts page and subresource requests against one persisted per-host daily quota', async () => {
+    const data = state();
+    data.settings.dailyRequestLimit = 2;
+    await setup(data);
+    const options = vi.mocked(BrowserManager).mock.calls.at(-1)![0];
+    options.requestAllowed!('https://authorized.test/page');
+    options.requestAllowed!('https://authorized.test/asset.js');
+    expect(() => options.requestAllowed!('https://authorized.test/fetch')).toThrow(SiteRestrictionError);
+    expect(() => options.requestAllowed!('https://other.test/asset')).not.toThrow();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(data.requestBudget?.counts).toEqual({ 'authorized.test': 2, 'other.test': 1 });
+  });
+
+  it('repeats only the selected current jobs, keeping historical and unstarted URLs out of the run', async () => {
+    const data = state();
+    const old = historicalJob('historic', 1, 'https://authorized.test/old-run');
+    data.jobs = [old];
+    const { controller, manager, assign, urls } = await setup(data);
+    await assign(1, [FIRST, SECOND]);
+    await assign(2, [OTHER]);
+    await controller.command({ type: 'browser', id: 1, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(urls()).toEqual([FIRST, SECOND]);
+
+    await vi.advanceTimersByTimeAsync(INTERVAL * 2);
+
+    expect(urls()).toEqual([FIRST, SECOND, FIRST, SECOND, FIRST, SECOND]);
+    expect(manager.runQa.mock.calls.every(([id]) => id === 1)).toBe(true);
+    expect(controller.snapshot().jobs.filter((job) => job.id === old.id)).toEqual([old]);
+    expect(controller.snapshot().jobs.find((job) => job.url === OTHER)?.status).toBe('pending');
+  });
+
+  it('replaces the selected browser’s recurring URLs without replacing another browser’s run', async () => {
+    const { controller, manager, assign, urls } = await setup();
+    await assign(1, [FIRST]);
+    await assign(2, [OTHER]);
+    await controller.command({ type: 'global', action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    await assign(1, [SECOND]);
+    await controller.command({ type: 'browser', id: 1, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const beforeRecurrence = manager.runQa.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+
+    expect(manager.runQa.mock.calls.slice(beforeRecurrence)).toEqual(
+      expect.arrayContaining([
+        [1, SECOND],
+        [2, OTHER],
+      ]),
+    );
+    expect(manager.runQa.mock.calls).toHaveLength(beforeRecurrence + 2);
+    expect(urls().filter((url) => url === FIRST)).toHaveLength(1);
+  });
+
+  it.each(['during a run', 'between recurring runs'] as const)(
+    'keeps newly assigned URLs pending when they were added %s without another Start',
+    async (when) => {
+      const { controller, manager, assign, urls } = await setup(state(1));
+      const first = manager.hold(FIRST);
+      await assign(1, [FIRST]);
+      await controller.command({ type: 'global', action: 'start' });
+      if (when === 'between recurring runs') {
+        first.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      await assign(1, [SECOND]);
+      first.resolve();
+      await vi.advanceTimersByTimeAsync(INTERVAL * 2);
+
+      expect(urls()).toEqual([FIRST, FIRST, FIRST]);
+      expect(controller.snapshot().jobs.find((job) => job.url === SECOND)?.status).toBe('pending');
+      await controller.command({ type: 'browser', id: 1, action: 'start' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(urls()).toEqual([FIRST, FIRST, FIRST, SECOND]);
+    },
+  );
+
+  it('accepts newly reviewed jobs when Start is pressed again during an active one-time run', async () => {
+    const data = state(1);
+    data.settings.schedule.enabled = false;
+    const { controller, manager, assign, urls } = await setup(data);
+    const first = manager.hold(FIRST);
+    await assign(1, [FIRST]);
+    await controller.command({ type: 'global', action: 'start' });
+    await assign(1, [SECOND]);
+
+    await controller.command({ type: 'browser', id: 1, action: 'start' });
+    first.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(urls()).toEqual([FIRST, SECOND]);
+    expect(controller.snapshot().jobs.every((job) => job.status === 'completed')).toBe(true);
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+    expect(urls()).toEqual([FIRST, SECOND]);
+  });
+
+  it.each(['during a run', 'after a run'] as const)(
+    'clearing the queue %s disables recurrence and preserves completed history',
+    async (when) => {
+      const data = state(1);
+      const old = historicalJob('historic', 1, 'https://authorized.test/old-run');
+      data.jobs = [old];
+      const { controller, manager, assign, urls } = await setup(data);
+      const first = manager.hold(FIRST);
+      await assign(1, [FIRST, SECOND]);
+      await controller.command({ type: 'global', action: 'start' });
+      if (when === 'after a run') {
+        first.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        await assign(1, ['https://authorized.test/unstarted']);
+      }
+
+      await controller.command({ type: 'clear-queue' });
+      first.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      const snapshot = controller.snapshot();
+      expect(snapshot.jobs.some((job) => job.status === 'pending')).toBe(false);
+      expect(snapshot.jobs.find((job) => job.id === old.id)).toEqual(old);
+      expect(snapshot.jobs.find((job) => job.url === FIRST)?.status).toBe('completed');
+      expect(snapshot.settings.schedule.enabled).toBe(false);
+      expect(snapshot.scheduler).toEqual({ running: false, paused: false, nextRunAt: null });
+      const completedUrls = urls();
+
+      await vi.advanceTimersByTimeAsync(INTERVAL * 3);
+
+      expect(urls()).toEqual(completedUrls);
+    },
+  );
+
+  it('keeps emergency-stopped recurrence disabled after restart while preserving pending work for review', async () => {
+    const data = state(1);
+    data.settings.schedule.resumeAfterRestart = true;
+    const original = await setup(data);
+    await original.assign(1, [FIRST]);
+    await original.controller.command({ type: 'global', action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    await original.assign(1, [SECOND]);
+    await original.controller.command({ type: 'global', action: 'stop' });
+    await original.close();
+
+    const restarted = await setup(original.saved());
+    await vi.advanceTimersByTimeAsync(INTERVAL * 3);
+
+    expect(restarted.urls()).toEqual([]);
+    expect(restarted.controller.snapshot().settings.schedule.enabled).toBe(false);
+    expect(restarted.controller.snapshot().scheduler.running).toBe(false);
+    expect(restarted.controller.snapshot().jobs.find((job) => job.url === FIRST)?.status).toBe('completed');
+    expect(restarted.controller.snapshot().jobs.find((job) => job.url === SECOND)?.status).toBe('pending');
+    await restarted.controller.command({ type: 'global', action: 'start' });
+    await vi.advanceTimersByTimeAsync(INTERVAL * 2);
+    expect(restarted.urls()).toEqual([SECOND]);
+  });
+});
+
+describe('browser queue lifecycle', () => {
+  it.each([
+    { label: 'closing a browser', command: { type: 'browser', id: 2, action: 'close' } },
+    { label: 'reducing the browser count', command: { type: 'create', count: 1 } },
+    { label: 'stopping one browser', command: { type: 'browser', id: 2, action: 'stop' } },
+  ] satisfies Array<{ label: string; command: AppCommand }>)(
+    '$label cancels its unfinished queue and prevents recurrence, including after reopening',
+    async ({ command }) => {
+      const { controller, manager, assign, urls } = await setup();
+      manager.hold(FIRST);
+      await assign(1, [OTHER]);
+      await assign(2, [FIRST, SECOND]);
+      await controller.command({ type: 'global', action: 'start' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(controller.snapshot().jobs.find((job) => job.url === SECOND)?.status).toBe('pending');
+
+      await controller.command(command);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const cancelled = controller.snapshot().jobs.filter((job) => job.browserId === 2);
+      expect(cancelled).toHaveLength(2);
+      expect(cancelled.every((job) => job.status === 'cancelled')).toBe(true);
+      expect(cancelled.every((job) => job.finishedAt && job.error)).toBe(true);
+      await vi.advanceTimersByTimeAsync(INTERVAL);
+      await controller.command({ type: 'create', count: 2 });
+      await vi.advanceTimersByTimeAsync(INTERVAL);
+
+      expect(urls().filter((url) => url === FIRST)).toHaveLength(1);
+      expect(urls()).not.toContain(SECOND);
+      expect(urls().filter((url) => url === OTHER)).toHaveLength(3);
+      expect(controller.snapshot().jobs.some((job) => job.browserId === 2 && job.status === 'pending')).toBe(
+        false,
+      );
+    },
+  );
+
+  it.each(['global', 'browser'] as const)(
+    '%s pause keeps the next job pending even if the current job finishes during the pause',
+    async (scope) => {
+      const { controller, manager, assign, urls } = await setup(state(1));
+      const first = manager.hold(FIRST);
+      const unstarted = 'https://authorized.test/assigned-while-paused';
+      await assign(1, [FIRST, SECOND]);
+      await controller.command({ type: 'global', action: 'start' });
+      await controller.command(
+        scope === 'global'
+          ? { type: 'global', action: 'pause' }
+          : { type: 'browser', id: 1, action: 'pause' },
+      );
+      await assign(1, [unstarted]);
+      // Completion can already be in flight when Pause reaches the native browser.
+      first.resolve();
+      await vi.advanceTimersByTimeAsync(INTERVAL * 3);
+
+      expect(urls()).toEqual([FIRST]);
+      expect(controller.snapshot().jobs.find((job) => job.url === SECOND)?.status).toBe('pending');
+      if (scope === 'global') expect(controller.snapshot().scheduler.paused).toBe(true);
+      await controller.command(
+        scope === 'global'
+          ? { type: 'global', action: 'resume' }
+          : { type: 'browser', id: 1, action: 'resume' },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(urls()).toEqual([FIRST, SECOND]);
+      expect(controller.snapshot().jobs.find((job) => job.url === SECOND)?.status).toBe('completed');
+      expect(controller.snapshot().jobs.find((job) => job.url === unstarted)?.status).toBe('pending');
+      await vi.advanceTimersByTimeAsync(INTERVAL);
+      expect(urls()).toEqual([FIRST, SECOND, FIRST, SECOND]);
+      expect(controller.snapshot().jobs.find((job) => job.url === unstarted)?.status).toBe('pending');
+    },
+  );
+});
+
+describe('failed jobs and restricted hosts', () => {
+  it('uses the actual restricted host after a redirect or external QA stage', async () => {
+    const { controller, manager, assign, urls } = await setup(state(3));
+    const blockedPending = 'https://other.test/pending';
+    await assign(2, [OTHER]);
+    await controller.command({ type: 'browser', id: 2, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    await assign(2, [blockedPending]);
+    await assign(3, [SECOND]);
+    await controller.command({ type: 'browser', id: 3, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    manager.failures.set(
+      FIRST,
+      new SiteRestrictionError('HTTP 403: testing requires manual review', 'https://other.test/restricted'),
+    );
+    await assign(1, [FIRST]);
+    await controller.command({ type: 'browser', id: 1, action: 'start' });
+    await vi.advanceTimersByTimeAsync(INTERVAL * 2);
+    expect(controller.snapshot().jobs.find((job) => job.url === blockedPending)?.status).toBe('cancelled');
+    expect(urls().filter((url) => url === OTHER)).toHaveLength(1);
+    expect(urls().filter((url) => url === FIRST)).toHaveLength(1);
+    expect(urls().filter((url) => url === SECOND)).toHaveLength(3);
+  });
+
+  it('stops another active browser already on the restricted host', async () => {
+    const { controller, manager, assign } = await setup();
+    manager.hold(OTHER);
+    await assign(2, [OTHER]);
+    await controller.command({ type: 'browser', id: 2, action: 'start' });
+    manager.failures.set(
+      FIRST,
+      new SiteRestrictionError('Challenge detected; manual review required', OTHER),
+    );
+    await assign(1, [FIRST]);
+    await controller.command({ type: 'browser', id: 1, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(manager.stop).toHaveBeenCalledWith(2);
+    expect(controller.snapshot().jobs.find((job) => job.url === OTHER)?.status).toBe('cancelled');
+  });
+
+  it.each([
+    'HTTP 401: testing paused; proxy rotation will not bypass this response',
+    'HTTP 403: testing paused; proxy rotation will not bypass this response',
+    'HTTP 429: testing paused; proxy rotation will not bypass this response',
+    'Challenge detected; manual review required',
+    'Rate limit reached',
+    'Daily navigation limit reached',
+  ])('stops pending and recurring work for the affected host after %s', async (message) => {
+    const { controller, manager, assign, urls } = await setup(state(3));
+    const previouslyCompleted = 'https://authorized.test/previously-completed';
+    const otherProfilePending = 'https://authorized.test/other-profile-pending';
+    await assign(3, [previouslyCompleted]);
+    await controller.command({ type: 'browser', id: 3, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    await assign(1, [FIRST, SECOND]);
+    await assign(3, [otherProfilePending]);
+    await assign(2, [OTHER]);
+    await controller.command({ type: 'browser', id: 2, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+    manager.failures.set(FIRST, new Error(message));
+
+    await controller.command({ type: 'browser', id: 1, action: 'start' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const snapshot = controller.snapshot();
+    expect(snapshot.jobs.find((job) => job.url === FIRST)).toMatchObject({
+      status: 'failed',
+      error: message,
+    });
+    for (const url of [SECOND, otherProfilePending])
+      expect(snapshot.jobs.find((job) => job.url === url)).toMatchObject({
+        status: 'cancelled',
+        error: expect.stringMatching(/review|restrict/i),
+      });
+    expect(snapshot.jobs.find((job) => job.url === previouslyCompleted)?.status).toBe('completed');
+
+    await vi.advanceTimersByTimeAsync(INTERVAL * 2);
+
+    expect(urls().filter((url) => new URL(url).hostname === 'authorized.test')).toEqual([
+      previouslyCompleted,
+      FIRST,
+    ]);
+    expect(urls().filter((url) => url === OTHER)).toHaveLength(3);
+  });
+
+  it('does not retry an ordinary failed job on a later schedule while another profile can continue', async () => {
+    const { controller, manager, assign, urls } = await setup();
+    await assign(1, [FIRST]);
+    await assign(2, [SECOND]);
+    manager.failures.set(FIRST, new Error('Page changed during scroll inspection'));
+    await controller.command({ type: 'global', action: 'start' });
+    await vi.advanceTimersByTimeAsync(INTERVAL * 2);
+
+    expect(urls().filter((url) => url === FIRST)).toHaveLength(1);
+    expect(urls().filter((url) => url === SECOND)).toHaveLength(3);
+    expect(controller.snapshot().jobs.find((job) => job.url === FIRST)?.status).toBe('failed');
+  });
+});

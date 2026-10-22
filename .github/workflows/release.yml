@@ -1,0 +1,58 @@
+name: Release Unicorn
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+  publish:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: windows-release-assets
+          path: release
+      - name: Verify release checksums and package version
+        run: |
+          cd release
+          sha256sum --check SHA256SUMS.txt
+          cd ..
+          node scripts/verify-release.mjs
+      - name: Publish verified versioned assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="v$version"
+          # --target only controls creation of a missing tag. The full checkout
+          # includes existing tags; peel annotated tags before comparing commits.
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            tag_sha=$(git rev-parse --verify "refs/tags/$tag^{commit}")
+            tested_sha=$(git rev-parse --verify "$GITHUB_SHA^{commit}")
+            if [[ "$tag_sha" != "$tested_sha" ]]; then
+              echo "Release tag $tag points to $tag_sha, but CI verified $tested_sha."
+              exit 1
+            fi
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "This version has already been published. Bump package.json before a new release."
+            exit 1
+          fi
+          flags=()
+          if [[ "$version" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$tag" release/*.exe release/*.zip release/SHA256SUMS.txt --target "$GITHUB_SHA" --title "Unicorn $tag" --notes-file docs/release-notes.md "${flags[@]}"
+          gh release view "$tag" --json url,assets
