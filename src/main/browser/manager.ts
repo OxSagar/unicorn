@@ -32,6 +32,14 @@ import { applyDevice, fitDevice, readDiagnostic } from './device';
 import { withDeadline } from './deadline';
 import { RecoveryBudget, RendererCrashError } from './recovery';
 
+/** No capacity is a temporary proxy shortage, not a page or policy failure. */
+class NoEligibleProxyError extends Error {
+  constructor() {
+    super('No eligible, unassigned proxy endpoint is currently available');
+    this.name = 'NoEligibleProxyError';
+  }
+}
+
 type BrowserAction =
   | 'back'
   | 'forward'
@@ -656,7 +664,7 @@ export class BrowserManager {
     signal.throwIfAborted();
     if (!proxy) {
       this.move(entry, 'WAITING_FOR_PROXY');
-      throw new Error('No eligible, unassigned proxy endpoint is currently available');
+      throw new NoEligibleProxyError();
     }
     await control?.checkpoint();
     entry.snapshot.proxy = proxy;
@@ -1018,7 +1026,11 @@ export class BrowserManager {
     });
   }
 
-  async runQa(id: number, url: string): Promise<void> {
+  async runQa(
+    id: number,
+    url: string,
+    options: { continuouslyRetryTransportFailures?: boolean } = {},
+  ): Promise<void> {
     const normalized = assertApproved(url, this.options.settings(id));
     const entry = this.entry(id);
     return this.operation(entry, true, async (control) => {
@@ -1033,18 +1045,39 @@ export class BrowserManager {
               return;
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
+              const transportFailure = isRetryableTransportError(error);
+              const waitingForProxy = error instanceof NoEligibleProxyError;
+              const continuous = options.continuouslyRetryTransportFailures === true;
               if (
                 control.signal.aborted ||
                 entry.restricted ||
-                !isRetryableTransportError(error) ||
-                attempt >= this.options.settings(id).retryLimit
+                !(transportFailure || (continuous && waitingForProxy)) ||
+                (!continuous && attempt >= this.options.settings(id).retryLimit)
               )
                 throw error;
-              await this.lockNetwork(entry, message);
+              // Quarantine the failed endpoint and close Chromium's route before
+              // obtaining another lease. Never retry using a direct connection.
+              await this.lockNetwork(entry, transportFailure ? message : undefined);
               this.move(entry, 'PROXY_FAILED');
               this.move(entry, 'RETRY_WAIT');
-              entry.snapshot.stage = `Network retry ${attempt + 1}`;
-              await control.wait(Math.min(30000, 1000 * 2 ** attempt));
+              entry.snapshot.lastError = undefined;
+              entry.snapshot.stage = waitingForProxy
+                ? 'Waiting for a new eligible proxy; will retry automatically'
+                : `Proxy connection failed; replacing endpoint (attempt ${attempt + 1})`;
+              if (transportFailure || attempt === 0 || attempt % 12 === 0)
+                this.log(
+                  entry,
+                  'warn',
+                  'proxy',
+                  waitingForProxy
+                    ? 'No eligible endpoint is available; waiting for a provider refresh'
+                    : `Proxy transport failure; quarantined endpoint and retrying the same URL: ${message}`,
+                );
+              // First transport replacements start promptly; prolonged outages
+              // back off so a depleted free pool does not cause a tight loop.
+              await control.wait(
+                waitingForProxy ? 5000 : Math.min(30000, 250 * 2 ** Math.min(attempt, 7)),
+              );
             }
           }
         },
