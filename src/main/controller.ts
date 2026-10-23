@@ -660,7 +660,8 @@ export class UnicornController {
       this.changed();
       try {
         assertApproved(job.url, this.settingsFor(id));
-        await this.manager.runQa(id, job.url, { continuouslyRetryTransportFailures: Boolean(simple) });
+        if (simple) await this.manager.runQa(id, job.url, { continuouslyRetryTransportFailures: true });
+        else await this.manager.runQa(id, job.url);
         job.status = 'completed';
         job.finishedAt = Date.now();
         this.data.totals.completed++;
