@@ -254,15 +254,23 @@ test('paste, Distribute and Start run only the reviewed assignments through scop
 });
 
 test('Start automatically replaces a dead proxy without redistributing or direct fallback', async () => {
-  harness = await launchUnicorn(fixtures, { proxyCount: 2 });
-  const review = await distribute(harness, `${origin}/policy/landing`, 1);
-  await fixtures.proxies[0]!.stop();
-  await startAndComplete(harness, review);
-  const state = await snapshot(harness);
-  expect(state.jobs.find((job) => job.id === review.jobIds[0])?.status).toBe('completed');
-  expect(state.proxies[0]).toMatchObject({ status: 'failed', failures: 1 });
-  expect(fixtures.proxies[1]!.requests + fixtures.proxies[1]!.tunnels).toBeGreaterThan(0);
-  expect(fixtures.directRequests()).toBe(0);
+  const isolated = await createFixtures(2);
+  try {
+    harness = await launchUnicorn(isolated, { proxyCount: 2 });
+    const testOrigin = isolated.httpsOrigin ?? isolated.httpOrigin;
+    const review = await distribute(harness, `${testOrigin}/policy/landing`, 1);
+    await isolated.proxies[0]!.stop();
+    await startAndComplete(harness, review);
+    const state = await snapshot(harness);
+    expect(state.jobs.find((job) => job.id === review.jobIds[0])?.status).toBe('completed');
+    expect(state.proxies[0]).toMatchObject({ status: 'failed', failures: 1 });
+    expect(isolated.proxies[1]!.requests + isolated.proxies[1]!.tunnels).toBeGreaterThan(0);
+    expect(isolated.directRequests()).toBe(0);
+  } finally {
+    await closeHarness(harness);
+    harness = undefined;
+    await isolated.close();
+  }
 });
 
 test('count 1–20 fills the chosen profiles and queues extra URLs without navigating or changing devices', async () => {
