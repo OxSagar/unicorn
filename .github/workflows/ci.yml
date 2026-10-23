@@ -34,7 +34,7 @@ jobs:
       - name: Audit packaged production dependencies
         run: npm audit --omit=dev --json --audit-level=low --fetch-retries=1 --fetch-timeout=30000 > test-results/production-audit.json
       - run: npm run build
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: unit-test-reports
@@ -155,7 +155,7 @@ jobs:
               Remove-Item $certificatePath -Force -Confirm:$false -ErrorAction Stop
             }
           }
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: windows-verification-reports
@@ -163,7 +163,7 @@ jobs:
             test-results
             playwright-report
           retention-days: 14
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: success()
         with:
           name: windows-release-assets
