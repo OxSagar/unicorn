@@ -143,7 +143,7 @@ async function setup(
   settings.authorizedDomains = ['authorized.test'];
   settings.stagingConfirmed = true;
   settings.retryLimit = retryLimit;
-  const acquire = vi.fn(async () => ({ ...proxy }));
+  const acquire = vi.fn(async (): Promise<ProxyRecord | null> => ({ ...proxy }));
   const release = vi.fn(async (_id: number, _reason?: string) => undefined);
   const log = vi.fn();
   const saveProfile = vi.fn();
@@ -453,6 +453,61 @@ describe('direct endpoint assignment failures', () => {
       expect(Boolean(manager.snapshots()[0].proxy)).toBe(action === 'replacement');
     },
   );
+});
+
+describe('continuous proxy replacement for reviewed batches', () => {
+  it('retries the same URL after the default two-retry limit until a replacement connects', async () => {
+    const { manager, first, acquire, release } = await setup(2);
+    const error = Object.assign(new Error('ERR_PROXY_CONNECTION_FAILED loading landing'), {
+      code: 'ERR_PROXY_CONNECTION_FAILED',
+    });
+    first.loadURL.mockRejectedValueOnce(error).mockRejectedValueOnce(error).mockRejectedValueOnce(error);
+    native.stages.mockImplementationOnce(async (url: string, hooks: QaHooks) => {
+      await hooks.navigate(url);
+    });
+    const run = manager.runQa(1, target, { continuouslyRetryTransportFailures: true });
+    await vi.advanceTimersByTimeAsync(5000);
+    await run;
+    expect(first.loadURL.mock.calls.filter(([url]) => url === target)).toHaveLength(4);
+    expect(acquire).toHaveBeenCalledTimes(4);
+    expect(release.mock.calls.filter((call) => call[1] !== undefined)).toHaveLength(3);
+    expect(manager.snapshots()[0].state).toBe('COMPLETED');
+  });
+
+  it('waits for Stop instead of marking a reviewed job failed when no endpoints remain', async () => {
+    const { manager, first, acquire } = await setup(2);
+    const error = Object.assign(new Error('ERR_PROXY_CONNECTION_FAILED loading landing'), {
+      code: 'ERR_PROXY_CONNECTION_FAILED',
+    });
+    first.loadURL.mockRejectedValueOnce(error);
+    acquire.mockResolvedValueOnce({ ...proxy }).mockResolvedValue(null);
+    native.stages.mockImplementationOnce(async (url: string, hooks: QaHooks) => {
+      await hooks.navigate(url);
+    });
+    const result = manager
+      .runQa(1, target, { continuouslyRetryTransportFailures: true })
+      .catch((failure: unknown) => failure);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(manager.snapshots()[0].state).toBe('RETRY_WAIT');
+    await manager.stop(1);
+    await result;
+    expect(first.loadURL.mock.calls.filter(([url]) => url === target)).toHaveLength(1);
+    expect(manager.snapshots()[0].state).toBe('STOPPED');
+  });
+
+  it('does not rotate on a site access restriction', async () => {
+    const { manager, acquire, session } = await setup(2);
+    native.stages.mockImplementationOnce(async (url: string, hooks: QaHooks) => {
+      await hooks.navigate(url);
+      session.gate!.hooks.onRestricted(429, url);
+      await hooks.control.checkpoint();
+    });
+    await expect(
+      manager.runQa(1, target, { continuouslyRetryTransportFailures: true }),
+    ).rejects.toBeInstanceOf(SiteRestrictionError);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(acquire).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('manager renderer recovery lifetime', () => {

@@ -1,8 +1,13 @@
-# Unicorn 1.0.0-rc.3
+# Unicorn 1.0.0-rc.4
 
 Unicorn now has one main screen with only the requested setup: **browser count, device type and links**, followed by **Distribute → Start**.
 
 ## Changes
+
+- Fix failed proxy transport recovery in the simple reviewed batch: failed endpoints are quarantined, and each affected URL is retried using a newly assigned proxy rather than ending after two attempts.
+- When all eligible endpoints are unavailable, the run remains in a cancelable wait state, with automatic replenishment and bounded backoff. **Stop** and **Pause** remain available; no direct network fallback is allowed.
+- HTTP 401/403/429, access challenges, TLS certificate-policy failures and out-of-scope navigation remain blocked rather than triggering proxy changes.
+- Retain the same three-input workflow, persistent profiles, proxy country restrictions and previous UI layout.
 
 - Remove the four-page navigation, advanced settings, manual assignments, profile inspector and separate proxy controls.
 - Keep a browser-count choice from 1–20 and one Desktop/Mobile/Tablet selector. No separate Apply button is needed.
@@ -15,7 +20,7 @@ Unicorn now has one main screen with only the requested setup: **browser count, 
 
 ## Installation
 
-Download `Unicorn-Setup-v1.0.0-rc.3-x64.exe` or `Unicorn-Portable-v1.0.0-rc.3-x64.zip`, plus `SHA256SUMS.txt`. Check the matching hash before launching. Extract the entire portable archive before opening `Unicorn.exe`.
+Download `Unicorn-Setup-v1.0.0-rc.4-x64.exe` or `Unicorn-Portable-v1.0.0-rc.4-x64.zip`, plus `SHA256SUMS.txt`. Check the matching hash before launching. Extract the entire portable archive before opening `Unicorn.exe`.
 
 Windows 10/11 x64 is targeted. An interactive user session is required. The app embeds Chromium, not a separately installed branded Google Chrome product.
 

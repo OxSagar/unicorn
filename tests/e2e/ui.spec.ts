@@ -253,6 +253,26 @@ test('paste, Distribute and Start run only the reviewed assignments through scop
   expect(await browserEvaluate(harness, 1, 'window.policyReady')).toBe(true);
 });
 
+test('Start automatically replaces a dead proxy without redistributing or direct fallback', async () => {
+  const isolated = await createFixtures(2);
+  try {
+    harness = await launchUnicorn(isolated, { proxyCount: 2 });
+    const testOrigin = isolated.httpsOrigin ?? isolated.httpOrigin;
+    const review = await distribute(harness, `${testOrigin}/policy/landing`, 1);
+    await isolated.proxies[0]!.stop();
+    await startAndComplete(harness, review);
+    const state = await snapshot(harness);
+    expect(state.jobs.find((job) => job.id === review.jobIds[0])?.status).toBe('completed');
+    expect(state.proxies[0]).toMatchObject({ status: 'failed', failures: 1 });
+    expect(isolated.proxies[1]!.requests + isolated.proxies[1]!.tunnels).toBeGreaterThan(0);
+    expect(isolated.directRequests()).toBe(0);
+  } finally {
+    await closeHarness(harness);
+    harness = undefined;
+    await isolated.close();
+  }
+});
+
 test('count 1–20 fills the chosen profiles and queues extra URLs without navigating or changing devices', async () => {
   harness = await launchUnicorn(fixtures, { settings: { browserCount: 3 } });
   await invoke(harness, { type: 'device', ids: [3], device: DEVICES.tablet });

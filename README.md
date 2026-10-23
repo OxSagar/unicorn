@@ -6,11 +6,11 @@ Unicorn embeds real Electron `WebContentsView` browser engines. Each profile kee
 
 ## Download and release status
 
-Get verified packages from [GitHub Releases](https://github.com/OxSagar/unicorn/releases). The current version is **1.0.0-rc.3**. A release candidate is intended for evaluation; it is not a production-readiness claim. Check [Actions](https://github.com/OxSagar/unicorn/actions) for the exact release's Windows verification and [release notes](docs/release-notes.md) for changes and acceptance limits.
+Get verified packages from [GitHub Releases](https://github.com/OxSagar/unicorn/releases). The current version is **1.0.0-rc.4**. A release candidate is intended for evaluation; it is not a production-readiness claim. Check [Actions](https://github.com/OxSagar/unicorn/actions) for the exact release's Windows verification and [release notes](docs/release-notes.md) for changes and acceptance limits.
 
 Windows release assets include an NSIS installer, a portable ZIP, and `SHA256SUMS.txt`. Release automation requires unit checks, real Electron tests on Windows, package construction, packaged application launch, and installed application launch before publishing. Unsigned builds may trigger Windows warnings. No signing certificate is bundled or invented.
 
-Version rc.3 replaces the four-page interface with one screen: browser count, device type, links, **Distribute**, **Start**, run status and live previews. There are no timing, distribution, proxy or advanced settings to configure. **Stop** remains available during work. Proxy preflight validation remains removed, and Austria remains eligible. The [recorded rc.1 measurements](docs/verification.md) are historical; current results belong to the matching release workflow.
+Version rc.4 retains the four-page interface with one screen: browser count, device type, links, **Distribute**, **Start**, run status and live previews. There are no timing, distribution, proxy or advanced settings to configure. **Stop** remains available during work. Proxy preflight validation remains removed, and Austria remains eligible. The [recorded rc.1 measurements](docs/verification.md) are historical; current results belong to the matching release workflow.
 
 ## What it does
 
@@ -19,6 +19,7 @@ Version rc.3 replaces the four-page interface with one screen: browser count, de
 - Fetches ProxyScrape public proxies from **US, GB, CA, FR, DE, JP, IT, and AT (Austria)** and assigns eligible API-listed endpoints directly. There is no diagnostic request, exit-IP lookup, latency probe, or separate validation queue.
 - Reserves unique proxy endpoints atomically. Different endpoints can share an exit IP; API country labels are not independently verified.
 - Blocks page networking before proxy assignment and after pause, stop, or failure. Proxy configuration contains no direct fallback and removes the implicit loopback bypass.
+- For simplified reviewed runs, network transport errors quarantine failed endpoints and automatically retry the same URL with another eligible proxy. Empty pools wait for refresh and remain stoppable; access restrictions do not rotate proxies.
 - Keeps the pasted draft locally. Distribute creates an exact, reviewable batch without browsing; changing the count, device or links requires another Distribute before Start.
 - Runs bounded landing-page, internal-link, and approved external-link QA stages with asynchronous waits, scrolling, console/resource diagnostics, screenshots, and cancellation.
 - Runs the prepared batch once using automatic defaults, with daily navigation/request budgets and emergency Stop. Saved recurrence never starts work on application launch, and the simple workflow does not arm a repeating schedule.
