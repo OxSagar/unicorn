@@ -143,7 +143,7 @@ async function setup(
   settings.authorizedDomains = ['authorized.test'];
   settings.stagingConfirmed = true;
   settings.retryLimit = retryLimit;
-  const acquire = vi.fn(async () => ({ ...proxy }));
+  const acquire = vi.fn(async (): Promise<ProxyRecord | null> => ({ ...proxy }));
   const release = vi.fn(async (_id: number, _reason?: string) => undefined);
   const log = vi.fn();
   const saveProfile = vi.fn();
