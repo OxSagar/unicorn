@@ -484,7 +484,8 @@ describe('continuous proxy replacement for reviewed batches', () => {
     native.stages.mockImplementationOnce(async (url: string, hooks: QaHooks) => {
       await hooks.navigate(url);
     });
-    const result = manager.runQa(1, target, { continuouslyRetryTransportFailures: true })
+    const result = manager
+      .runQa(1, target, { continuouslyRetryTransportFailures: true })
       .catch((failure: unknown) => failure);
     await vi.advanceTimersByTimeAsync(1500);
     expect(manager.snapshots()[0].state).toBe('RETRY_WAIT');
@@ -501,8 +502,9 @@ describe('continuous proxy replacement for reviewed batches', () => {
       session.gate!.hooks.onRestricted(429, url);
       await hooks.control.checkpoint();
     });
-    await expect(manager.runQa(1, target, { continuouslyRetryTransportFailures: true }))
-      .rejects.toBeInstanceOf(SiteRestrictionError);
+    await expect(
+      manager.runQa(1, target, { continuouslyRetryTransportFailures: true }),
+    ).rejects.toBeInstanceOf(SiteRestrictionError);
     await vi.advanceTimersByTimeAsync(10000);
     expect(acquire).toHaveBeenCalledTimes(1);
   });
