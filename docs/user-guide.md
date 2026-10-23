@@ -1,4 +1,4 @@
-# Unicorn user guide — 1.0.0-rc.3
+# Unicorn user guide — 1.0.0-rc.4
 
 ## Choose browsers and device → Paste → Distribute → Start
 
@@ -20,9 +20,9 @@ Use **Stop** or `Ctrl+Shift+S` to cancel. Stop remains available while a command
 ## Everything else is automatic
 
 - Proxies come directly from ProxyScrape for **US, GB, CA, FR, DE, JP, IT and AT (Austria)**. There is no proxy preflight request, exit-IP lookup, geography recheck or latency probe.
-- Each active profile reserves a unique endpoint. Failed proxies never enable direct fallback. Country labels are API metadata, so an endpoint can fail on its first page request.
+- Each active profile reserves a unique endpoint. During a reviewed run, a connection failure quarantines that proxy and automatically retries the same URL using another endpoint until it connects or you press Stop. When none are available, Unicorn waits and periodically tries the provider again. Failed proxies never enable direct fallback. Country labels are API metadata, so an endpoint can fail on its first page request.
 - The selected device preset changes real Chromium viewport, pixel ratio, touch and user-agent behavior. It does not erase that profile's website data.
-- QA uses bounded default waits, scrolling and retries. Its stages can include the landing page, an eligible internal link and an approved external link. Missing eligible links are recorded as skipped stages.
+- QA uses bounded default waits, scrolling and retries for non-connection recovery. Connection-level proxy failures during reviewed runs have continuous, stoppable replacement rather than a two-attempt limit. Its stages can include the landing page, an eligible internal link and an approved external link. Missing eligible links are recorded as skipped stages.
 - The batch runs once. Saved repeating schedules are not armed by this workflow or by restarting Unicorn.
 
 There is no Settings page, browser-selection checklist, manual assignment editor, proxy refresh button or separate Apply step.
@@ -42,7 +42,7 @@ The link draft is saved locally. Approval is temporary: after restarting, Distri
 Download the versioned installer or portable ZIP and `SHA256SUMS.txt` from [GitHub Releases](https://github.com/OxSagar/unicorn/releases). Check the matching SHA-256 value before launching:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\Unicorn-Setup-v1.0.0-rc.3-x64.exe
+Get-FileHash -Algorithm SHA256 .\Unicorn-Setup-v1.0.0-rc.4-x64.exe
 ```
 
 Install the EXE, or extract the entire ZIP and open `Unicorn.exe`. Windows 10/11 x64 and an interactive user session are targeted. The release is unsigned; follow Windows or organizational application policies. Automatic updates are not provided.
