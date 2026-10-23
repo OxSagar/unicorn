@@ -21,7 +21,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src tests scripts *.ts *.mjs",
     "format": "prettier --write .",
-    "format:check": "prettier --write src/main/browser/manager.ts tests/unit/engine-manager-recovery.test.ts && git --no-pager diff -- src/main/browser/manager.ts tests/unit/engine-manager-recovery.test.ts && exit 1",
+    "format:check": "prettier --check .",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "test:packaged": "node scripts/smoke-packaged.mjs",
