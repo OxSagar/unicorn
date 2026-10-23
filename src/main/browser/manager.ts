@@ -1075,9 +1075,7 @@ export class BrowserManager {
                 );
               // First transport replacements start promptly; prolonged outages
               // back off so a depleted free pool does not cause a tight loop.
-              await control.wait(
-                waitingForProxy ? 5000 : Math.min(30000, 250 * 2 ** Math.min(attempt, 7)),
-              );
+              await control.wait(waitingForProxy ? 5000 : Math.min(30000, 250 * 2 ** Math.min(attempt, 7)));
             }
           }
         },
